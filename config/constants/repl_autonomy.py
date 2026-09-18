@@ -24,9 +24,18 @@ DEFAULT_AUTO_LEVEL: Final[AutoLevel] = AutoLevel.HIGH
 
 AUTO_LEVEL_CAPTIONS: Final[dict[AutoLevel, str]] = {
     AutoLevel.OFF: "all actions require approval",
-    AutoLevel.LOW: "edits and read-only commands",
-    AutoLevel.MED: "allow reversible commands",
+    AutoLevel.LOW: "approve shell and mutating tools",
+    AutoLevel.MED: "approve shell and mutating tools",
     AutoLevel.HIGH: "all actions allowed",
+}
+
+# Idle status bar — short permission words. High is the default; hiding the
+# caption made it look like "best / full power" instead of allow-all.
+AUTO_LEVEL_BAR_CAPTIONS: Final[dict[AutoLevel, str]] = {
+    AutoLevel.OFF: "Ask everything",
+    AutoLevel.LOW: "Ask shell + edits",
+    AutoLevel.MED: "Ask shell + edits",
+    AutoLevel.HIGH: "Allow all",
 }
 
 # Display title inside ``Auto (Med)`` — Factory uses Med, not medium.
@@ -39,9 +48,10 @@ AUTO_LEVEL_TITLES: Final[dict[AutoLevel, str]] = {
 
 # tool_type values that still need confirmation at this level (High: none).
 # Mutation-capable agent tools ask at Med+ — including synthetic_test (spawns a
-# mutation-classified subprocess), slash/CLI, and Sentry issue-fix (edits the
-# working tree and can commit/push/open a PR) — otherwise those run without
-# the confirmation promised by ``/auto med``.
+# mutation-classified subprocess), slash/CLI, Sentry issue-fix (edits the
+# working tree and can commit/push/open a PR), and the merge push (commits a
+# resolved merge and pushes the branch) — otherwise those run without the
+# confirmation promised by ``/auto med``.
 _MUTATING_AGENT_TOOL_TYPES: Final[frozenset[str]] = frozenset(
     {
         "shell",
@@ -52,18 +62,15 @@ _MUTATING_AGENT_TOOL_TYPES: Final[frozenset[str]] = frozenset(
         "switch_llm_provider",
         "synthetic_test",
         "sentry_issue_fix",
+        "merge_push",
     }
 )
 
 AUTO_LEVEL_ASK_TOOL_TYPES: Final[dict[AutoLevel, frozenset[str] | None]] = {
     AutoLevel.HIGH: frozenset(),
-    # Med "allow reversible commands": read-only work runs, but mutation-capable
-    # tool types still need confirmation.
+    # Read-only tool types run; shell text is not treated as provably read-only.
     AutoLevel.MED: _MUTATING_AGENT_TOOL_TYPES,
-    # Low also asks before starting a full investigation — including the
-    # sample-alert path, which uses tool_type ``sample_alert`` (not
-    # ``investigation``) but still launches an investigation with side effects.
-    AutoLevel.LOW: _MUTATING_AGENT_TOOL_TYPES | frozenset({"investigation", "sample_alert"}),
+    AutoLevel.LOW: _MUTATING_AGENT_TOOL_TYPES,
     AutoLevel.OFF: None,  # ask every tool type
 }
 
@@ -81,16 +88,23 @@ def parse_auto_level(raw: str) -> AutoLevel | None:
 
 
 def format_auto_status_plain(level: AutoLevel) -> str:
-    """``Auto (Med) · allow reversible commands`` without ANSI."""
+    """Format the session's auto level for the ``/auto`` command."""
     return f"Auto ({AUTO_LEVEL_TITLES[level]}) · {AUTO_LEVEL_CAPTIONS[level]}"
+
+
+def format_auto_status_bar(level: AutoLevel) -> str:
+    """``Auto (High) · Allow all`` — live prompt chrome, no model slug."""
+    return f"Auto ({AUTO_LEVEL_TITLES[level]}) · {AUTO_LEVEL_BAR_CAPTIONS[level]}"
 
 
 __all__ = [
     "AUTO_LEVEL_ASK_TOOL_TYPES",
+    "AUTO_LEVEL_BAR_CAPTIONS",
     "AUTO_LEVEL_CAPTIONS",
     "AUTO_LEVEL_TITLES",
     "AutoLevel",
     "DEFAULT_AUTO_LEVEL",
+    "format_auto_status_bar",
     "format_auto_status_plain",
     "parse_auto_level",
 ]

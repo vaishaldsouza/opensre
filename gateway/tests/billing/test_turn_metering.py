@@ -13,9 +13,9 @@ from gateway.core.billing.turn_metering import admit_metered_turn, bound_turn_me
 
 @pytest.mark.parametrize(
     "outcome",
-    [CreditsOutcome.ALLOWED, CreditsOutcome.UNCONFIGURED, CreditsOutcome.UNAVAILABLE],
+    [CreditsOutcome.ALLOWED, CreditsOutcome.DISABLED],
 )
-def test_non_denied_outcomes_admit_the_bound_turn(
+def test_allowed_or_deliberately_disabled_metering_admits_the_bound_turn(
     monkeypatch: pytest.MonkeyPatch,
     outcome: CreditsOutcome,
 ) -> None:
@@ -26,12 +26,47 @@ def test_non_denied_outcomes_admit_the_bound_turn(
     with bound_turn_metering(
         organization_id="org_metered",
         reason="telegram_turn",
+        idempotency_key="telegram:44271",
         on_denied=denied,
     ):
         admitted = admit_metered_turn()
 
     assert admitted is True
-    consume.assert_called_once_with("org_metered", reason="telegram_turn")
+    consume.assert_called_once_with(
+        "org_metered", reason="telegram_turn", idempotency_key="telegram:44271"
+    )
+    denied.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [CreditsOutcome.UNCONFIGURED, CreditsOutcome.UNAVAILABLE],
+)
+def test_untrustworthy_metering_outcomes_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: CreditsOutcome,
+) -> None:
+    denied = MagicMock()
+    monkeypatch.setattr(
+        turn_metering,
+        "consume_credits",
+        MagicMock(return_value=outcome),
+    )
+
+    with (
+        bound_turn_metering(
+            organization_id="org_metered",
+            reason="slack_turn",
+            idempotency_key="slack:1712.0001",
+            on_denied=denied,
+        ),
+        pytest.raises(
+            turn_metering.CreditMeteringUnavailableError,
+            match="refusing unmetered work",
+        ),
+    ):
+        admit_metered_turn()
+
     denied.assert_not_called()
 
 
@@ -48,6 +83,7 @@ def test_denied_outcome_owns_the_response_and_rejects_the_turn(
     with bound_turn_metering(
         organization_id="org_metered",
         reason="buzz_turn",
+        idempotency_key="buzz:ev_1",
         on_denied=denied,
     ):
         admitted = admit_metered_turn()

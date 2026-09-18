@@ -1,11 +1,11 @@
 ---
 title: "Grafana"
-description: "Connect Grafana so OpenSRE can query metrics, dashboards, and alerts during investigations"
+description: "Connect Grafana so OpenSRE can query metrics, dashboards, and alerts"
 ---
 
 ## Overview
 
-OpenSRE queries Grafana (Cloud or self-hosted) for logs, metrics, traces, alert rules, and annotations during investigations. For a local Minikube lab with Prometheus and a sample app, see [Extras](#extras).
+OpenSRE queries Grafana (Cloud or self-hosted) for logs, metrics, traces, alert rules, and annotations. For a local Minikube lab with Prometheus and a sample app, see [Extras](#extras).
 
 ## Prerequisites
 
@@ -102,7 +102,7 @@ Create a Grafana service account token with read access. See [Grafana service ac
 
 Use this value as `GRAFANA_READ_TOKEN` (CLI prompt: service account token).
 
-## Investigation tools
+## Tools
 
 | Tool | Use it for |
 | --- | --- |
@@ -112,7 +112,7 @@ Use this value as `GRAFANA_READ_TOKEN` (CLI prompt: service account token).
 | `query_grafana_alert_rules` | Alert rule configuration and thresholds |
 | `query_grafana_service_names` | Discover Loki `service_name` labels before querying logs |
 
-Deployment and config-change markers are covered on [Grafana Annotations](/grafana_annotations). To push investigation reports into Loki/annotations, see [Grafana Log Sink](/grafana-log-sink). For standalone Tempo (no Grafana proxy), see [Grafana Tempo](/tempo).
+Deployment and config-change markers are covered on [Grafana Annotations](/grafana_annotations). For standalone Tempo (no Grafana proxy), see [Grafana Tempo](/tempo).
 
 ## Verify
 
@@ -130,7 +130,7 @@ opensre integrations verify grafana
 
 ## Security
 
-- Prefer a dedicated service account token with read-only access for investigations.
+- Prefer a dedicated service account token with read-only access.
 - Prefer `GRAFANA_CA_BUNDLE` over disabling TLS verification for real internal Grafana.
 - Set `GRAFANA_VERIFY_SSL=false` only for local/lab instances.
 - Store tokens in `.env` or your secret manager — not in source control.
@@ -375,39 +375,39 @@ emit or relabel a `service_name` label.
    relabel config alongside Promtail's defaults:
 
    ```bash
-cat > /tmp/promtail-values.yaml << 'EOF'
-promtail:
-  config:
-    snippets:
-      common:
-        - action: replace
-          source_labels: [__meta_kubernetes_pod_node_name]
-          target_label: node_name
-        - action: replace
-          source_labels: [__meta_kubernetes_namespace]
-          target_label: namespace
-        - action: replace
-          replacement: $1
-          separator: /
-          source_labels: [namespace, app]
-          target_label: job
-        - action: replace
-          source_labels: [__meta_kubernetes_pod_name]
-          target_label: pod
-        - action: replace
-          source_labels: [__meta_kubernetes_pod_container_name]
-          target_label: container
-        - action: replace
-          source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
-          target_label: service_name
-        - action: replace
-          replacement: /var/log/pods/*$1/*.log
-          separator: /
-          source_labels: [__meta_kubernetes_pod_uid, __meta_kubernetes_pod_container_name]
-          target_label: __path__
-EOF
-helm upgrade loki grafana/loki-stack -n monitoring -f /tmp/promtail-values.yaml \
-  --set promtail.enabled=true --reuse-values
+   cat > /tmp/promtail-values.yaml << 'EOF'
+   promtail:
+     config:
+       snippets:
+         common:
+           - action: replace
+             source_labels: [__meta_kubernetes_pod_node_name]
+             target_label: node_name
+           - action: replace
+             source_labels: [__meta_kubernetes_namespace]
+             target_label: namespace
+           - action: replace
+             replacement: $1
+             separator: /
+             source_labels: [namespace, app]
+             target_label: job
+           - action: replace
+             source_labels: [__meta_kubernetes_pod_name]
+             target_label: pod
+           - action: replace
+             source_labels: [__meta_kubernetes_pod_container_name]
+             target_label: container
+           - action: replace
+             source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+             target_label: service_name
+           - action: replace
+             replacement: /var/log/pods/*$1/*.log
+             separator: /
+             source_labels: [__meta_kubernetes_pod_uid, __meta_kubernetes_pod_container_name]
+             target_label: __path__
+   EOF
+   helm upgrade loki grafana/loki-stack -n monitoring -f /tmp/promtail-values.yaml \
+     --set promtail.enabled=true --reuse-values
    ```
 
    <Warning>
@@ -425,17 +425,17 @@ helm upgrade loki grafana/loki-stack -n monitoring -f /tmp/promtail-values.yaml 
    states tracing is disabled unless `--otel-service-name` is set):
 
    ```bash
-cat > /tmp/podinfo-tracing-values.yaml << 'EOF'
-serviceMonitor:
-  enabled: true
-extraArgs:
-  - "--otel-service-name=podinfo"
-extraEnvs:
-  - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-    value: "http://tempo.monitoring:4317"
-EOF
-helm upgrade podinfo podinfo/podinfo -n podinfo -f /tmp/podinfo-tracing-values.yaml
-kubectl -n podinfo wait --for=condition=Ready pods --all --timeout=60s
+   cat > /tmp/podinfo-tracing-values.yaml << 'EOF'
+   serviceMonitor:
+     enabled: true
+   extraArgs:
+     - "--otel-service-name=podinfo"
+   extraEnvs:
+     - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+       value: "http://tempo.monitoring:4317"
+   EOF
+   helm upgrade podinfo podinfo/podinfo -n podinfo -f /tmp/podinfo-tracing-values.yaml
+   kubectl -n podinfo wait --for=condition=Ready pods --all --timeout=60s
    ```
 
    The upgrade replaces the podinfo pod, so re-run the port-forward from
@@ -469,7 +469,7 @@ kubectl -n podinfo wait --for=condition=Ready pods --all --timeout=60s
    for i in $(seq 1 5); do curl -s http://localhost:8080/status/500 >/dev/null; done
    ```
 
-### Run a real investigation
+### Ask the agent
 
 ```bash
 opensre integrations verify grafana
@@ -481,19 +481,8 @@ grafana │ local env │ ✓ passed │ Connected to http://localhost:3000 and
         │           │          │ discovered loki, prometheus, tempo datasources.
 ```
 
-Trigger a real investigation against the firing `PodinfoHighErrorRate` alert from
-[Steps](#steps) -- this is the actual supported entrypoint, not an internal import:
-
-```bash
-opensre investigate --input-json '{
-  "alert_name": "PodinfoHighErrorRate",
-  "severity": "critical",
-  "commonAnnotations": {
-    "summary": "Podinfo error rate is high",
-    "service_name": "podinfo"
-  }
-}'
-```
+Then start `opensre` and ask about the failing app from [Steps](#steps), e.g.
+*Why is podinfo's error rate high? Check Grafana logs, metrics, and traces.*
 
 All 6 registered tools return real data against this lab once the datasources and
 relabelings above are in place -- confirmed by direct calls to each tool: metrics

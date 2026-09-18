@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Final
+from collections.abc import Mapping, Sequence
+from typing import Final, cast
 
 from infrastructure.analytics.event_properties import (
+    _bounded_redacted_text,
     _bucket_duration_ms,
     _bucket_percentage,
     _integration_lifecycle_properties,
-    _investigation_completed_properties,
-    _investigation_failed_properties,
-    _investigation_outcome_properties,
     _onboard_completed_properties,
 )
 from infrastructure.analytics.events import Event
-from infrastructure.analytics.investigation_tracker_types import (
-    InvestigationTracker,
-    _with_investigation_loop_metrics,
-)
-from infrastructure.analytics.provider import Properties, get_analytics
+from infrastructure.analytics.provider import JsonValue, Properties, get_analytics
 from infrastructure.observability.errors.sentry import capture_exception
+
+_ASK_USER_LABEL_MAX_CHARS: Final[int] = 80
+_ASK_USER_TITLE_MAX_CHARS: Final[int] = 500
+_ASK_USER_OPTION_MAX_CHARS: Final[int] = 300
 
 EVAL_AND_TERMINAL_KPI_QUERIES: Final[dict[str, str]] = {
     "terminal_action_execution_success_rate": """
@@ -75,28 +73,6 @@ def _capture(event: Event, properties: Properties | None = None) -> None:
         capture_exception(exc)
 
 
-def capture_investigation_lifecycle_event(
-    event: Event,
-    properties: Properties,
-    *,
-    state: Mapping[str, object] | None = None,
-    tracker: InvestigationTracker | None = None,
-    loop_count: int | None = None,
-    iteration_cap: int | None = None,
-) -> None:
-    """Capture an investigation lifecycle event with canonical loop metrics."""
-    _capture(
-        event,
-        _with_investigation_loop_metrics(
-            properties,
-            loop_count=loop_count,
-            iteration_cap=iteration_cap,
-            state=state,
-            tracker=tracker,
-        ),
-    )
-
-
 def capture_cli_invoked(properties: Properties | None = None) -> None:
     # Whole-process default for local CLI; gateway binds surface per turn instead.
     try:
@@ -108,6 +84,37 @@ def capture_cli_invoked(properties: Properties | None = None) -> None:
         analytics.capture(Event.CLI_INVOKED, properties)
     except Exception as exc:
         capture_exception(exc)
+
+
+def capture_account_authenticated() -> None:
+    """Link this installation ID to server-resolved account identity."""
+    try:
+        analytics = get_analytics()
+        analytics.refresh_destination()
+        analytics.capture(Event.ACCOUNT_AUTHENTICATED)
+    except Exception as exc:
+        capture_exception(exc)
+
+
+def capture_sign_in_prompted() -> None:
+    """Exposure event: the mandatory sign-in screen was rendered to a signed-out user."""
+    _capture(Event.SIGN_IN_PROMPTED, {"entrypoint": "sign_in_gate"})
+
+
+def capture_sign_in_selected(*, choice_label: str) -> None:
+    """User picked sign-in on the gate; ``account_authenticated`` reports the outcome."""
+    _capture(
+        Event.SIGN_IN_SELECTED,
+        {"choice_label": choice_label, "method": "menu", "entrypoint": "sign_in_gate"},
+    )
+
+
+def capture_stay_signed_out_selected(*, choice_label: str, method: str) -> None:
+    """User left the gate signed out: ``menu`` picked the exit option, ``dismissed`` closed the menu."""
+    _capture(
+        Event.STAY_SIGNED_OUT_SELECTED,
+        {"choice_label": choice_label, "method": method, "entrypoint": "sign_in_gate"},
+    )
 
 
 def capture_gateway_turn_started(*, surface: str) -> None:
@@ -143,7 +150,7 @@ def capture_gateway_turn_failed(
     """Mark a failed gateway agent turn (exception during dispatch).
 
     ``surface`` may be omitted when transport context was unbound so failures
-    still land in PostHog for regression detection.
+    still land in product analytics for regression detection.
     """
     props: Properties = {
         "duration_ms": round(duration_ms),
@@ -170,129 +177,6 @@ def capture_onboard_completed(config: Mapping[str, object]) -> None:
 
 def capture_onboard_failed() -> None:
     _capture(Event.ONBOARD_FAILED)
-
-
-def capture_diagnosis_category_mismatch(
-    *,
-    root_cause_category: str,
-    mismatch_reason: str | None = None,
-) -> None:
-    properties: Properties = {
-        "category_text_mismatch": True,
-        "root_cause_category": root_cause_category,
-    }
-    if mismatch_reason:
-        properties["mismatch_reason"] = mismatch_reason
-    _capture(Event.DIAGNOSIS_CATEGORY_MISMATCH, properties)
-
-
-def capture_investigation_completed(*, tracker: InvestigationTracker | None = None) -> None:
-    if tracker is None:
-        _capture(Event.INVESTIGATION_COMPLETED)
-        return
-    if tracker.completed:
-        return
-    if tracker.failed or not tracker.enabled:
-        return
-    _capture(
-        Event.INVESTIGATION_COMPLETED,
-        _investigation_completed_properties(
-            shared_properties=tracker.shared_properties,
-            tracker=tracker,
-        ),
-    )
-    tracker.completed = True
-
-
-def capture_investigation_failed(
-    *,
-    tracker: InvestigationTracker | None = None,
-    failure_type: str | None = None,
-    failure_message: str | None = None,
-    failure_detail: str | None = None,
-    failure_category: str | None = None,
-    integration_involved: str | None = None,
-    integration_failure_message: str | None = None,
-    investigation_target: str | None = None,
-    shared_properties: Properties | None = None,
-    state: Mapping[str, object] | None = None,
-) -> None:
-    props = _investigation_failed_properties(
-        shared_properties=shared_properties or (tracker.shared_properties if tracker else {}),
-        failure_type=failure_type,
-        failure_message=failure_message,
-        failure_detail=failure_detail,
-        failure_category=failure_category,
-        integration_involved=integration_involved,
-        integration_failure_message=integration_failure_message,
-        investigation_target=investigation_target,
-        state=state,
-        tracker=tracker,
-    )
-    if tracker is None:
-        _capture(Event.INVESTIGATION_FAILED, props)
-        return
-    if tracker.failed or not tracker.enabled:
-        tracker.failed = True
-        return
-    _capture(Event.INVESTIGATION_FAILED, props)
-    tracker.failed = True
-
-
-def capture_investigation_cancelled(
-    *,
-    investigation_id: str,
-    investigation_target: str = "",
-    tracker: InvestigationTracker | None = None,
-    state: Mapping[str, object] | None = None,
-) -> None:
-    shared = tracker.shared_properties if tracker is not None and tracker.enabled else {}
-    if investigation_id and not shared.get("investigation_id"):
-        shared = {**shared, "investigation_id": investigation_id}
-    properties: Properties = {
-        **shared,
-        "failure_category": "user_cancelled",
-    }
-    if investigation_target:
-        properties["investigation_target"] = investigation_target
-    capture_investigation_lifecycle_event(
-        Event.INVESTIGATION_CANCELLED,
-        properties,
-        state=state,
-        tracker=tracker,
-    )
-
-
-def capture_investigation_outcome(
-    *,
-    investigation_id: str,
-    status: str,
-    investigation_target: str,
-    root_cause_excerpt: str = "",
-    error_excerpt: str = "",
-    failure_category: str | None = None,
-    integration_involved: str | None = None,
-    integration_failure_message: str | None = None,
-    failure_detail: str | None = None,
-    state: Mapping[str, object] | None = None,
-) -> None:
-    if not investigation_id:
-        return
-    _capture(
-        Event.INVESTIGATION_OUTCOME,
-        _investigation_outcome_properties(
-            investigation_id=investigation_id,
-            status=status,
-            investigation_target=investigation_target,
-            root_cause_excerpt=root_cause_excerpt,
-            error_excerpt=error_excerpt,
-            failure_category=failure_category,
-            integration_involved=integration_involved,
-            integration_failure_message=integration_failure_message,
-            failure_detail=failure_detail,
-            state=state,
-        ),
-    )
 
 
 def capture_integration_setup_started(service: str) -> None:
@@ -330,53 +214,19 @@ def capture_loop_suggestion_skipped() -> None:
     _capture(Event.LOOP_SUGGESTION_SKIPPED)
 
 
-def capture_tests_picker_opened() -> None:
-    _capture(Event.TESTS_PICKER_OPENED)
+def capture_onboarding_demo_prompted() -> None:
+    """Exposure event: the onboarding demo picker was rendered."""
+    _capture(Event.ONBOARDING_DEMO_PROMPTED)
 
 
-def capture_test_synthetic_started(scenario: str, *, mock_grafana: bool) -> None:
-    _capture(
-        Event.TEST_SYNTHETIC_STARTED,
-        {"scenario": scenario, "mock_grafana": mock_grafana},
-    )
+def capture_onboarding_demo_selected(*, option: str, custom: bool) -> None:
+    """User picked a demo; ``custom`` marks a typed answer instead of a listed option."""
+    _capture(Event.ONBOARDING_DEMO_SELECTED, {"option": option, "custom": custom})
 
 
-def capture_test_synthetic_completed(scenario: str, *, exit_code: int) -> None:
-    _capture(Event.TEST_SYNTHETIC_COMPLETED, {"scenario": scenario, "exit_code": exit_code})
-
-
-def capture_test_synthetic_failed(scenario: str, *, reason: str) -> None:
-    _capture(Event.TEST_SYNTHETIC_FAILED, {"scenario": scenario, "reason": reason})
-
-
-def capture_tests_listed(category: str, *, search: bool) -> None:
-    _capture(Event.TESTS_LISTED, {"category": category, "search": search})
-
-
-def capture_test_run_started(test_id: str, *, dry_run: bool) -> None:
-    _capture(Event.TEST_RUN_STARTED, {"test_id": test_id, "dry_run": dry_run})
-
-
-def capture_test_run_completed(test_id: str, *, dry_run: bool, exit_code: int) -> None:
-    _capture(
-        Event.TEST_RUN_COMPLETED,
-        {
-            "test_id": test_id,
-            "dry_run": dry_run,
-            "exit_code": exit_code,
-        },
-    )
-
-
-def capture_test_run_failed(test_id: str, *, dry_run: bool, reason: str) -> None:
-    _capture(
-        Event.TEST_RUN_FAILED,
-        {
-            "test_id": test_id,
-            "dry_run": dry_run,
-            "reason": reason,
-        },
-    )
+def capture_onboarding_demo_skipped() -> None:
+    """User dismissed the onboarding demo picker without choosing."""
+    _capture(Event.ONBOARDING_DEMO_SKIPPED)
 
 
 def capture_terminal_actions_planned(*, planned_count: int, has_unhandled_clause: bool) -> None:
@@ -420,8 +270,6 @@ def capture_react_turn_completed(
     cli_turn_kind: str,
     llm_provider: str,
     llm_model: str,
-    investigation_id: str | None = None,
-    investigation_loop_count: int | None = None,
     prompt_turn_id: str | None = None,
 ) -> None:
     properties: Properties = {
@@ -437,10 +285,6 @@ def capture_react_turn_completed(
         "llm_provider": llm_provider,
         "llm_model": llm_model,
     }
-    if investigation_id:
-        properties["investigation_id"] = investigation_id
-    if investigation_loop_count is not None:
-        properties["investigation_loop_count"] = investigation_loop_count
     if prompt_turn_id:
         properties["prompt_turn_id"] = prompt_turn_id
     _capture(Event.REACT_TURN_COMPLETED, properties)
@@ -468,6 +312,183 @@ def capture_terminal_turn_summarized(
             "session_fallback_count": session_fallback_count,
             "session_action_success_bucket": _bucket_percentage(session_action_success_percent),
             "session_fallback_rate_bucket": _bucket_percentage(session_fallback_rate_percent),
+        },
+    )
+
+
+def capture_agent_tool_call_completed(
+    *,
+    tool_call_id: str,
+    tool_name: str,
+    source: str,
+    role: str,
+    outcome: str,
+    executed: bool,
+    is_error: bool,
+    terminate: bool,
+    duration_ms: int,
+    work_status: str = "",
+) -> None:
+    """Record the privacy-safe outcome of one model-requested tool call."""
+    _capture(
+        Event.AGENT_TOOL_CALL_COMPLETED,
+        {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "source": source,
+            "role": role,
+            "outcome": outcome,
+            "executed": executed,
+            "is_error": is_error,
+            "terminate": terminate,
+            "duration_ms": duration_ms,
+            "duration_bucket": _bucket_duration_ms(duration_ms),
+            "work_status": work_status,
+        },
+    )
+
+
+def _ask_user_questions(
+    questions: Sequence[Mapping[str, object]],
+) -> list[dict[str, JsonValue]]:
+    sanitized: list[dict[str, JsonValue]] = []
+    for question in questions:
+        raw_options = question.get("options")
+        options = (
+            raw_options
+            if isinstance(raw_options, Sequence) and not isinstance(raw_options, str)
+            else ()
+        )
+        sanitized.append(
+            {
+                "label": _bounded_redacted_text(
+                    question.get("label", ""), max_chars=_ASK_USER_LABEL_MAX_CHARS
+                ),
+                "title": _bounded_redacted_text(
+                    question.get("title", ""), max_chars=_ASK_USER_TITLE_MAX_CHARS
+                ),
+                "options": [
+                    _bounded_redacted_text(option, max_chars=_ASK_USER_OPTION_MAX_CHARS)
+                    for option in options
+                ],
+                "multi_select": bool(question.get("multi_select", False)),
+            }
+        )
+    return sanitized
+
+
+def _with_optional_skill(properties: Properties, skill_name: str | None) -> Properties:
+    if skill_name:
+        properties["skill_name"] = skill_name
+    return properties
+
+
+def capture_ask_user_prompt_rendered(
+    *,
+    interaction_id: str,
+    questions: Sequence[Mapping[str, object]],
+    render_mode: str,
+    allow_custom: bool,
+    has_command_options: bool,
+    skill_name: str | None,
+) -> None:
+    """Record a structured Ask User prompt when it becomes visible."""
+    sanitized = _ask_user_questions(questions)
+    _capture(
+        Event.ASK_USER_PROMPT_RENDERED,
+        _with_optional_skill(
+            {
+                "interaction_id": interaction_id,
+                "prompt_kind": "batch" if len(sanitized) > 1 else "single",
+                "question_count": len(sanitized),
+                "questions": cast(list[JsonValue], sanitized),
+                "render_mode": render_mode,
+                "allow_custom": allow_custom,
+                "has_command_options": has_command_options,
+            },
+            skill_name,
+        ),
+    )
+
+
+def capture_ask_user_prompt_answered(
+    *,
+    interaction_id: str,
+    selected_option_indices: Sequence[Sequence[int]],
+    custom_answers: Sequence[str | None],
+    disposition: str,
+    skill_name: str | None,
+) -> None:
+    """Record listed/custom options selected from a rendered Ask User prompt."""
+    answer_details: list[JsonValue] = []
+    for index, (indices, custom_answer) in enumerate(
+        zip(selected_option_indices, custom_answers, strict=True)
+    ):
+        detail: dict[str, JsonValue] = {
+            "question_index": index,
+            "selected_option_indices": list(indices),
+            "custom": custom_answer is not None,
+        }
+        if custom_answer is not None:
+            detail["answer"] = _bounded_redacted_text(
+                custom_answer, max_chars=_ASK_USER_TITLE_MAX_CHARS
+            )
+        answer_details.append(detail)
+    _capture(
+        Event.ASK_USER_PROMPT_ANSWERED,
+        _with_optional_skill(
+            {
+                "interaction_id": interaction_id,
+                "question_count": len(answer_details),
+                "answers": answer_details,
+                "disposition": disposition,
+            },
+            skill_name,
+        ),
+    )
+
+
+def capture_ask_user_prompt_dismissed(
+    *, interaction_id: str, reason: str, skill_name: str | None
+) -> None:
+    """Record a rendered Ask User prompt closed without an answer."""
+    _capture(
+        Event.ASK_USER_PROMPT_DISMISSED,
+        _with_optional_skill(
+            {"interaction_id": interaction_id, "reason": reason},
+            skill_name,
+        ),
+    )
+
+
+def capture_interactive_shell_rendered(*, entrypoint: str) -> None:
+    """Record successful first paint of the interactive shell chrome."""
+    _capture(Event.INTERACTIVE_SHELL_RENDERED, {"entrypoint": entrypoint})
+
+
+def capture_browser_open_requested(*, target: str, opened: bool) -> None:
+    """Record an application-requested browser open without retaining its URL."""
+    _capture(Event.BROWSER_OPEN_REQUESTED, {"target": target, "opened": opened})
+
+
+def capture_skill_executed(*, skill_name: str, entrypoint: str) -> None:
+    """Record one successful entry into an OpenSRE skill workflow."""
+    _capture(
+        Event.SKILL_EXECUTED,
+        {"skill_name": skill_name, "entrypoint": entrypoint},
+    )
+
+
+def capture_opensre_commit_created(
+    *, workflow: str, commit_kind: str, changed_file_count: int
+) -> None:
+    """Record a git commit successfully created by an OpenSRE workflow."""
+    _capture(
+        Event.OPENSRE_COMMIT_CREATED,
+        {
+            "workflow": workflow,
+            "commit_kind": commit_kind,
+            "changed_file_count": changed_file_count,
         },
     )
 

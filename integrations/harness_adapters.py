@@ -2,9 +2,29 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+
+def _setupable_services() -> tuple[str, ...]:
+    """Services with a setup wizard; imported on first use.
+
+    ``integrations.cli`` pulls every vendor's setup flow (~2,000 modules).
+    Registration must stay cheap at process boot, so the import waits until
+    the port is actually read (``/integrations setup``).
+    """
+    from integrations.cli import setup_services
+
+    return tuple(setup_services())
+
+
+def _fetch_webapp_vault() -> list[dict[str, Any]] | None:
+    """Webapp org integrations; the vault client imports on first use."""
+    import integrations.webapp_vault as webapp_vault
+
+    return webapp_vault.fetch_webapp_org_integrations()
+
 
 def register_harness_adapters() -> None:
-    import integrations.webapp_vault as webapp_vault
     from infrastructure.harness_providers import IntegrationResolutionAdapters
     from integrations.catalog import (
         classify_integrations,
@@ -13,7 +33,6 @@ def register_harness_adapters() -> None:
         merge_integrations_by_service,
         merge_local_integrations,
     )
-    from integrations.cli import setup_services
     from integrations.store import load_integrations, resolve_store_path
 
     IntegrationResolutionAdapters(
@@ -24,17 +43,17 @@ def register_harness_adapters() -> None:
         merge_local_integrations=merge_local_integrations,
         merge_integrations_by_service=merge_integrations_by_service,
         configured_services=lambda: tuple(configured_integration_services()),
-        setupable_services=lambda: tuple(setup_services()),
-        fetch_webapp_vault=lambda: webapp_vault.fetch_webapp_org_integrations(),
+        setupable_services=_setupable_services,
+        fetch_webapp_vault=_fetch_webapp_vault,
     ).install()
 
     _register_vcs_repo_scope_providers()
+    _register_runbook_source_providers()
     _register_cli_llm_adapters()
     _register_alert_source_detectors()
     _register_alert_source_routing()
     _register_incident_anchor_parsers()
     _register_prompt_fragments()
-    _register_taxonomy_profiles()
     _register_message_context_strippers()
     _register_alert_detail_fields()
     _register_secondary_tool_sources()
@@ -53,6 +72,17 @@ def _register_vcs_repo_scope_providers() -> None:
     clear_vcs_repo_scope_providers()
     register_vcs_repo_scope_provider(GITHUB_VCS_REPO_SCOPE_PROVIDER)
     register_vcs_repo_scope_provider(GITLAB_VCS_REPO_SCOPE_PROVIDER)
+
+
+def _register_runbook_source_providers() -> None:
+    from infrastructure.harness_providers import (
+        clear_runbook_source_providers,
+        register_runbook_source_provider,
+    )
+    from integrations.github.runbooks import build_github_runbook_source
+
+    clear_runbook_source_providers()
+    register_runbook_source_provider("github", build_github_runbook_source)
 
 
 def _register_alert_source_detectors() -> None:
@@ -100,29 +130,17 @@ def _register_prompt_fragments() -> None:
     from infrastructure.harness_providers import (
         clear_action_prompt_fragments,
         clear_assistant_prompt_fragments,
-        clear_gather_prompt_fragments,
         register_action_prompt_fragment,
         register_assistant_prompt_fragment,
-        register_gather_prompt_fragment,
     )
     from integrations.buzz.action_prompt import buzz_action_prompt_fragment
     from integrations.github.action_prompt import github_action_prompt_fragment
-    from integrations.github.gather_prompt import github_gather_prompt_fragment
     from integrations.posthog.assistant_prompt import posthog_assistant_prompt_fragment
-    from integrations.posthog.gather_prompt import posthog_gather_prompt_fragment
     from integrations.rocketchat.action_prompt import rocketchat_action_prompt_fragment
     from integrations.sentry.assistant_prompt import sentry_assistant_prompt_fragment
-    from integrations.sentry.gather_prompt import sentry_gather_prompt_fragment
     from integrations.slack.action_prompt import slack_action_prompt_fragment
     from integrations.slack.assistant_prompt import slack_assistant_prompt_fragment
-    from integrations.slack.gather_prompt import slack_gather_prompt_fragment
     from integrations.telegram.action_prompt import telegram_action_prompt_fragment
-
-    clear_gather_prompt_fragments()
-    register_gather_prompt_fragment(github_gather_prompt_fragment)
-    register_gather_prompt_fragment(posthog_gather_prompt_fragment)
-    register_gather_prompt_fragment(sentry_gather_prompt_fragment)
-    register_gather_prompt_fragment(slack_gather_prompt_fragment)
 
     clear_action_prompt_fragments()
     register_action_prompt_fragment(slack_action_prompt_fragment)
@@ -135,17 +153,6 @@ def _register_prompt_fragments() -> None:
     register_assistant_prompt_fragment(sentry_assistant_prompt_fragment)
     register_assistant_prompt_fragment(posthog_assistant_prompt_fragment)
     register_assistant_prompt_fragment(slack_assistant_prompt_fragment)
-
-
-def _register_taxonomy_profiles() -> None:
-    from core.domain.diagnosis.taxonomy_registry import (
-        clear_taxonomy_profiles,
-        register_taxonomy_profile,
-    )
-    from integrations.hermes.taxonomy import HERMES_TAXONOMY_PROFILE
-
-    clear_taxonomy_profiles()
-    register_taxonomy_profile(HERMES_TAXONOMY_PROFILE)
 
 
 def _register_message_context_strippers() -> None:
@@ -181,7 +188,7 @@ def _register_secondary_tool_sources() -> None:
     # integrations match. Each is owned by its own integration package;
     # registered here (rather than from each package's own module-import time)
     # so the set is explicit and easy to audit in one place.
-    for source in ("knowledge", "openclaw", "google_docs"):
+    for source in ("knowledge", "google_docs"):
         register_secondary_tool_source(source)
 
 
@@ -221,7 +228,6 @@ def _register_preferred_evidence_sources() -> None:
 
 
 def _register_cli_llm_adapters() -> None:
-    from typing import Any
 
     from core.llm.types import CliLLMClient, ModelType
     from infrastructure.harness_providers import CliLlmAdapters

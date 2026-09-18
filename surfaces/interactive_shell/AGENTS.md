@@ -19,10 +19,10 @@ should be predictable, interruptible, explainable, and safe by default.
 | --- | --- | --- |
 | `main.py` | process/bootstrap boundary for starting the REPL | per-turn dispatch/runtime logic |
 | `controller.py` | top-level REPL wiring, alert listener lifecycle, prompt loop, background workers, and shutdown | feature-specific business logic or compatibility-only forwarding |
-| `runtime/core/turn_accounting.py` | shell turn accounting (`ShellTurnAccounting`) for analytics, telemetry, recorder flush, turn persistence, and intent stamps | turn-flow control (owned by `core.agent_harness`) or tool-calling turn execution |
+| `runtime/core/turn_accounting.py` | shell turn accounting (`ShellTurnAccounting`) for analytics, recorder enrichment, history, and intent stamps | turn-flow control (owned by `core.agent_harness`) or tool-calling turn execution |
 | `command_registry/` | slash-command definitions, argument validation, command dispatch | long-running implementation details better placed in services/runtime modules |
 | `runtime/` | background task workers, lifecycle/`ReplState`, runtime context assembly, semantic shell-turn execution, and core harness adapters | prompt text, reusable session persistence, or compatibility shims |
-| `tools/interactive_shell/shell/` | shell command parsing, shell execution policy, subprocess execution, and the `run_shell_command`/`run_cd`/`run_pwd` runner (next to the `shell_run` tool in `tools/interactive_shell/actions/shell.py`) | slash-command execution |
+| `tools/interactive_shell/shell/` | shell command normalization, shell execution policy, subprocess execution, and the `run_shell_command` runner (next to the `shell_run` tool in `tools/interactive_shell/actions/shell.py`) | slash-command execution |
 | `references/` | CLI/docs/source/AGENTS reference loading and caching | generated model prose |
 | `config/` | interactive-shell config loading and tool catalog metadata | global app config unrelated to the REPL |
 | `ui/` | Rich/prompt-toolkit rendering, theme, menus, streaming output, and domain views such as `incoming_alerts.py` (receiver/queue/listener lifecycle lives in `core.domain.alerts.inbox`) | business logic or network calls |
@@ -130,10 +130,8 @@ owning area rather than adding more logic to the caller.
        `docs/interactive-shell-action-policy.md` ("Deterministic literal-`/slash`
        dispatch").
     2. Structured Want-me-to *accept* after a pending offer armed this session —
-       schedule yes expands to `/cron …`; investigation yes expands to
-       `/investigate alert:…`. Both are literal slash text and use path 1 only
-       (no separate static `investigation_start` bypass). Surfaces that disable
-       the investigation capability (gateway) must not arm the pending offer.
+       schedule yes expands to `/cron …`. That is literal slash text and uses
+       path 1 only.
 - **No planning-stage fail-closed safeguard (v0.1 decision).** The second-phase
   action agent never denies a turn. Because every terminal action is read-only,
   an unmatched/ambiguous/chatty clause is not a safety risk — the agent executes
@@ -187,8 +185,9 @@ owning area rather than adding more logic to the caller.
 
 ## Shell, subprocesses, and local system effects
 
-- Shell execution changes belong under `shell/` and must preserve parsing,
-  quoting, timeout, redaction, and policy behavior.
+- Shell execution changes belong under `tools/interactive_shell/shell/`. Pass
+  command grammar to the host shell rather than duplicating its parser, and
+  preserve input normalization, timeout, redaction, and policy behavior.
 - Treat subprocess output as untrusted display text; escape it before Rich
   markup and cap what is retained or sent to prompts.
 - Use explicit timeouts and clear cancellation behavior for subprocesses. Avoid

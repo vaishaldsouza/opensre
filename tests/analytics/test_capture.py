@@ -6,35 +6,8 @@ from infrastructure.analytics import (
     capture,
     event_properties,
     github_identity,
-    investigation_tracker,
 )
 from infrastructure.analytics.events import Event
-from infrastructure.analytics.source import EntrypointSource, TriggerMode
-
-
-def _assert_investigation_events_have_source(
-    events: list[tuple[Event, dict[str, object] | None]],
-) -> None:
-    investigation_events = {
-        Event.INVESTIGATION_STARTED,
-        Event.INVESTIGATION_COMPLETED,
-        Event.INVESTIGATION_FAILED,
-        Event.INVESTIGATION_OUTCOME,
-        Event.INVESTIGATION_CANCELLED,
-    }
-    for event, properties in events:
-        if event not in investigation_events:
-            continue
-        assert properties is not None, f"{event.value} must include properties"
-        source = properties.get("source")
-        assert isinstance(source, str), f"{event.value} must include a string source"
-        assert source.strip(), f"{event.value} source must be non-empty"
-        assert properties.get("investigation_loop_count") is not None, (
-            f"{event.value} must include investigation_loop_count"
-        )
-        assert properties.get("investigation_iteration_cap") is not None, (
-            f"{event.value} must include investigation_iteration_cap"
-        )
 
 
 class _StubAnalytics:
@@ -42,6 +15,7 @@ class _StubAnalytics:
         self.events: list[tuple[Event, dict[str, object] | None]] = []
         self.identified: list[dict[str, object]] = []
         self.persistent_properties: dict[str, object] = {}
+        self.destination_refreshes = 0
 
     def capture(self, event: Event, properties: dict[str, object] | None = None) -> None:
         self.events.append((event, properties))
@@ -51,6 +25,9 @@ class _StubAnalytics:
 
     def set_persistent_property(self, key: str, value: object) -> None:
         self.persistent_properties[key] = value
+
+    def refresh_destination(self) -> None:
+        self.destination_refreshes += 1
 
 
 def test_capture_cli_invoked_uses_safe_capture(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,6 +56,23 @@ def test_capture_cli_invoked_reports_analytics_failures_to_sentry(
     capture.capture_cli_invoked()
 
     assert captured_errors == [expected_error]
+
+
+def test_capture_account_authenticated_refreshes_credentials_before_link_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _OrderCheckingAnalytics(_StubAnalytics):
+        def capture(self, event: Event, properties: dict[str, object] | None = None) -> None:
+            assert self.destination_refreshes == 1
+            super().capture(event, properties)
+
+    stub = _OrderCheckingAnalytics()
+    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
+
+    capture.capture_account_authenticated()
+
+    assert stub.destination_refreshes == 1
+    assert stub.events == [(Event.ACCOUNT_AUTHENTICATED, None)]
 
 
 def test_identify_github_username_sets_person_property(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,6 +170,39 @@ def test_build_cli_invoked_properties_handles_root_invocation() -> None:
     assert "command_leaf" not in properties
 
 
+def test_build_install_detected_properties_keeps_installer_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENSRE_INSTALL_SOURCE", "posix_installer")
+    monkeypatch.setenv("OPENSRE_INSTALL_CHANNEL", "release")
+    monkeypatch.setenv("OPENSRE_INSTALL_VERSION", "2026.9.14")
+    monkeypatch.setattr(event_properties.sys, "frozen", True, raising=False)
+
+    properties = event_properties.build_install_detected_properties(entrypoint="opensre")
+
+    assert properties == {
+        "entrypoint": "opensre",
+        "install_source": "posix_installer",
+        "distribution": "frozen_binary",
+        "install_channel": "release",
+        "installed_version": "2026.9.14",
+    }
+
+
+def test_build_install_detected_properties_redacts_secret_shaped_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENSRE_INSTALL_SOURCE", "ghp_abcdefghijklmnopqrstuvwxyz1234567890")
+    monkeypatch.setenv("OPENSRE_INSTALL_CHANNEL", "release")
+    monkeypatch.setenv("OPENSRE_INSTALL_VERSION", "ghp_abcdefghijklmnopqrstuvwxyz1234567890")
+
+    properties = event_properties.build_install_detected_properties(entrypoint="opensre")
+
+    assert "ghp_" not in str(properties)
+    assert properties["install_source"] == "[REDACTED:github_pat]"
+    assert properties["installed_version"] == "[REDACTED:github_pat]"
+
+
 def test_capture_update_helpers_emit_expected_events(monkeypatch: pytest.MonkeyPatch) -> None:
     stub = _StubAnalytics()
     monkeypatch.setattr(capture, "get_analytics", lambda: stub)
@@ -220,6 +247,75 @@ def test_capture_terminal_metrics_emit_expected_contract(monkeypatch: pytest.Mon
         assert required.issubset(properties.keys())
 
 
+def test_capture_ask_user_events_link_redacted_prompt_and_selected_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _StubAnalytics()
+    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
+    questions = [
+        {
+            "label": "Access",
+            "title": "Use token ghp_abcdefghijklmnopqrstuvwxyz1234567890?",
+            "options": ["Read only", "Admin"],
+            "multi_select": False,
+        }
+    ]
+
+    capture.capture_ask_user_prompt_rendered(
+        interaction_id="prompt-1",
+        questions=questions,
+        render_mode="picker",
+        allow_custom=True,
+        has_command_options=False,
+        skill_name="triage",
+    )
+    capture.capture_ask_user_prompt_answered(
+        interaction_id="prompt-1",
+        selected_option_indices=((0,),),
+        custom_answers=(None,),
+        disposition="agent_answer",
+        skill_name="triage",
+    )
+
+    rendered = stub.events[0][1]
+    answered = stub.events[1][1]
+    assert rendered is not None and answered is not None
+    assert stub.events[0][0] is Event.ASK_USER_PROMPT_RENDERED
+    assert stub.events[1][0] is Event.ASK_USER_PROMPT_ANSWERED
+    assert "ghp_" not in str(rendered["questions"])
+    assert rendered["interaction_id"] == answered["interaction_id"] == "prompt-1"
+    assert answered["answers"] == [
+        {
+            "question_index": 0,
+            "selected_option_indices": [0],
+            "custom": False,
+        }
+    ]
+    assert "answer" not in answered["answers"][0]
+
+
+def test_capture_ask_user_answered_keeps_bounded_custom_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _StubAnalytics()
+    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
+    capture.capture_ask_user_prompt_answered(
+        interaction_id="prompt-2",
+        selected_option_indices=((1,),),
+        custom_answers=("Use token ghp_abcdefghijklmnopqrstuvwxyz1234567890",),
+        disposition="agent_answer",
+        skill_name=None,
+    )
+
+    answered = stub.events[0][1]
+    assert answered is not None
+    detail = answered["answers"][0]
+    assert detail["custom"] is True
+    assert detail["selected_option_indices"] == [1]
+    assert "ghp_" not in str(detail["answer"])
+    assert "[REDACTED:github_pat]" in str(detail["answer"])
+
+
 def test_eval_and_terminal_kpi_queries_cover_core_metrics() -> None:
     expected_keys = {
         "terminal_action_execution_success_rate",
@@ -228,214 +324,3 @@ def test_eval_and_terminal_kpi_queries_cover_core_metrics() -> None:
     assert expected_keys.issubset(capture.EVAL_AND_TERMINAL_KPI_QUERIES.keys())
     for query in capture.EVAL_AND_TERMINAL_KPI_QUERIES.values():
         assert "FROM events" in query
-
-
-def test_track_investigation_emits_lifecycle_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    stub = _StubAnalytics()
-    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-
-    with investigation_tracker.track_investigation(
-        entrypoint=EntrypointSource.CLI_COMMAND,
-        trigger_mode=TriggerMode.FILE,
-        input_path="alert.json",
-    ):
-        pass
-
-    emitted_events = [event for event, _ in stub.events]
-    assert emitted_events == [Event.INVESTIGATION_STARTED, Event.INVESTIGATION_COMPLETED]
-    _assert_investigation_events_have_source(stub.events)
-    started_props = stub.events[0][1] or {}
-    completed_props = stub.events[1][1] or {}
-    assert started_props["source"] == "test"
-    assert started_props["entrypoint_source"] == "cli_command"
-    assert started_props["category"] == "test"
-    assert started_props["trigger_mode"] == "file"
-    assert started_props["is_test"] is True
-    assert started_props["investigation_id"] == completed_props["investigation_id"]
-    assert started_props["investigation_loop_count"] == 0
-    assert completed_props["investigation_loop_count"] == 0
-
-
-def test_track_investigation_emits_failed_on_exception(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stub = _StubAnalytics()
-    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-
-    # Wrap the raise in a callable so the ``raise`` lives inside ``_trigger``
-    # rather than directly in the test body. ``pytest.raises`` then sees a
-    # plain function call as its protected expression, which lets CodeQL
-    # ``py/unreachable-statement`` prove the assertions below are reachable
-    # (the previous nested-``with`` workaround still tripped the rule).
-    def _trigger() -> None:
-        with investigation_tracker.track_investigation(
-            entrypoint=EntrypointSource.MCP,
-            trigger_mode=TriggerMode.SERVICE_RUNTIME,
-        ):
-            raise RuntimeError("boom")
-
-    with pytest.raises(RuntimeError, match="boom"):
-        _trigger()
-
-    emitted_events = [event for event, _ in stub.events]
-    assert emitted_events == [Event.INVESTIGATION_STARTED, Event.INVESTIGATION_FAILED]
-    _assert_investigation_events_have_source(stub.events)
-    failed_props = stub.events[1][1] or {}
-    assert failed_props["failure_type"] == "RuntimeError"
-    assert failed_props["failure_message"] == "boom"
-
-
-def test_capture_investigation_failed_includes_state_loop_metrics(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stub = _StubAnalytics()
-    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-
-    capture.capture_investigation_failed(
-        failure_type="RuntimeError",
-        failure_message="boom",
-        shared_properties={"investigation_id": "inv-fail"},
-        state={"investigation_loop_count": 4, "investigation_iteration_cap": 20},
-    )
-
-    failed_props = stub.events[0][1] or {}
-    assert failed_props["investigation_loop_count"] == 4
-    assert failed_props["investigation_iteration_cap"] == 20
-
-
-def test_track_investigation_failed_uses_tracker_loop_metrics(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stub = _StubAnalytics()
-    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-
-    def _trigger() -> None:
-        with investigation_tracker.track_investigation(
-            entrypoint=EntrypointSource.CLI_COMMAND,
-            trigger_mode=TriggerMode.FILE,
-        ) as tracker:
-            tracker.record_loop_metrics_from_state(
-                {"investigation_loop_count": 6, "investigation_iteration_cap": 20}
-            )
-            raise RuntimeError("boom")
-
-    with pytest.raises(RuntimeError, match="boom"):
-        _trigger()
-
-    failed_props = stub.events[1][1] or {}
-    assert failed_props["investigation_loop_count"] == 6
-    assert failed_props["investigation_iteration_cap"] == 20
-
-
-def test_capture_investigation_outcome_and_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
-    stub = _StubAnalytics()
-    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-
-    capture.capture_investigation_outcome(
-        investigation_id="inv-123",
-        status="failed",
-        investigation_target="generic",
-        error_excerpt="boom",
-        failure_category="unknown",
-        state={"investigation_loop_count": 5, "investigation_iteration_cap": 20},
-    )
-    capture.capture_investigation_cancelled(
-        investigation_id="inv-456",
-        investigation_target="alert.json",
-        state={"investigation_loop_count": 2, "investigation_iteration_cap": 20},
-    )
-
-    assert stub.events[0][0] == Event.INVESTIGATION_OUTCOME
-    outcome_props = stub.events[0][1] or {}
-    assert outcome_props["investigation_id"] == "inv-123"
-    assert outcome_props["status"] == "failed"
-    assert outcome_props["investigation_target"] == "generic"
-    assert outcome_props["error_excerpt"] == "boom"
-    assert outcome_props["investigation_loop_count"] == 5
-    assert stub.events[1][0] == Event.INVESTIGATION_CANCELLED
-    cancelled_props = stub.events[1][1] or {}
-    assert cancelled_props["investigation_id"] == "inv-456"
-    assert cancelled_props["failure_category"] == "user_cancelled"
-    assert cancelled_props["investigation_loop_count"] == 2
-
-
-def test_track_investigation_records_loop_metrics_on_completion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stub = _StubAnalytics()
-    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-
-    with investigation_tracker.track_investigation(
-        entrypoint=EntrypointSource.CLI_COMMAND,
-        trigger_mode=TriggerMode.FILE,
-    ) as tracker:
-        tracker.record_loop_metrics_from_state(
-            {"investigation_loop_count": 8, "investigation_iteration_cap": 20}
-        )
-
-    completed_props = stub.events[1][1] or {}
-    assert completed_props["investigation_loop_count"] == 8
-    assert completed_props["investigation_iteration_cap"] == 20
-
-
-def test_track_investigation_nested_context_dedupes(monkeypatch: pytest.MonkeyPatch) -> None:
-    stub = _StubAnalytics()
-    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-
-    with (
-        investigation_tracker.track_investigation(
-            entrypoint=EntrypointSource.SDK,
-            trigger_mode=TriggerMode.SERVICE_RUNTIME,
-        ),
-        investigation_tracker.track_investigation(
-            entrypoint=EntrypointSource.CLI_COMMAND,
-            trigger_mode=TriggerMode.FILE,
-        ),
-    ):
-        pass
-
-    emitted_events = [event for event, _ in stub.events]
-    assert emitted_events == [Event.INVESTIGATION_STARTED, Event.INVESTIGATION_COMPLETED]
-    _assert_investigation_events_have_source(stub.events)
-
-
-def test_capture_diagnosis_category_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    stub = _StubAnalytics()
-    monkeypatch.setattr(capture, "get_analytics", lambda: stub)
-
-    capture.capture_diagnosis_category_mismatch(
-        root_cause_category="dns_resolution_failure",
-        mismatch_reason="root cause text signals database (2 keyword hits)",
-    )
-
-    assert stub.events == [
-        (
-            Event.DIAGNOSIS_CATEGORY_MISMATCH,
-            {
-                "category_text_mismatch": True,
-                "root_cause_category": "dns_resolution_failure",
-                "mismatch_reason": "root cause text signals database (2 keyword hits)",
-            },
-        )
-    ]
-
-
-def test_investigation_started_properties_use_current_model_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    monkeypatch.setenv("ANTHROPIC_REASONING_MODEL", "claude-opus-4-7")
-    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
-    monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.delenv("OPENAI_REASONING_MODEL", raising=False)
-
-    properties = event_properties._investigation_started_properties(
-        input_path=None,
-        input_json=None,
-        interactive=False,
-        evaluate_requested=False,
-        shared_properties={},
-    )
-
-    assert properties["llm_provider"] == "anthropic"
-    assert properties["llm_model"] == "claude-opus-4-7"

@@ -31,10 +31,6 @@ owner module instead of broadening module responsibilities.
   only.
 - `background/workers.py` — alert watcher lifecycle, spinner ticker lifecycle,
   sampler startup, turn-start background-output drains only.
-- `background/runner.py`, `background/notifications.py` — session-local
-  background investigation launchers and RCA completion notification delivery
-  only (record/preferences ownership itself lives in
-  `core.agent_harness.session.background`).
 - `core/state.py` — `ReplState`, `SpinnerState`: runtime state and transition
   helpers only (see State ownership rules below).
 - `core/turn_detection.py` — pure text classifiers for cancel/confirm
@@ -94,7 +90,7 @@ flowchart TD
   controller --> turnHost["runtime.turn_host.run_agent_turn(turn_runtime, text)"]
   turnHost --> turnEntry["interactive_shell.runtime.shell_turn_execution.execute_shell_turn"]
   turnEntry --> coreHarness["core.agent_harness.turns.orchestrator.run_turn"]
-  coreHarness --> sideEffects["slash/help/agent/follow-up/investigation side effects"]
+  coreHarness --> sideEffects["slash/help/agent/follow-up side effects"]
   controller --> replState["core.state.ReplState"]
   controller --> spinnerState["core.state.SpinnerState"]
   controller --> inputReader["input.PromptInputReader"]
@@ -135,8 +131,8 @@ flowchart TD
 - Turn accounting is consolidated behind `ShellTurnAccounting` in
   `interactive_shell/runtime/core/turn_accounting.py`, invoked from
   `execute_shell_turn`. It owns action-agent analytics, terminal-turn aggregate
-  telemetry, prompt-recorder flush, conversational-turn persistence, and the
-  final assistant-intent stamp. `runtime.action_turn.run_action_tool_turn`
+  telemetry, prompt-recorder enrichment, history, and the final assistant-intent
+  stamp. Shared `run_turn` owns prompt-recorder creation and flush for each dispatch. `runtime.action_turn.run_action_tool_turn`
   returns facts only (`ToolCallingTurnResult` with `accounting_status` of
   `completed` / `not_run`) and emits no analytics itself. Do not re-scatter
   accounting back into `run_action_tool_turn` or standalone `_record_*` helpers.

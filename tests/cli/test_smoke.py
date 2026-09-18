@@ -14,6 +14,7 @@ import sysconfig
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -43,6 +44,10 @@ _CLEARED_ENV_KEYS = (
     "DD_APP_KEY",
     "DD_SITE",
     "GEMINI_API_KEY",
+    "GITHUB_MCP_AUTH_TOKEN",
+    "GITHUB_MCP_MODE",
+    "GITHUB_MCP_TOOLSETS",
+    "GITHUB_MCP_URL",
     "GOOGLE_CREDENTIALS_FILE",
     "GOOGLE_DRIVE_FOLDER_ID",
     "GRAFANA_INSTANCE_URL",
@@ -54,11 +59,6 @@ _CLEARED_ENV_KEYS = (
     "NVIDIA_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
-    "OPENCLAW_MCP_ARGS",
-    "OPENCLAW_MCP_AUTH_TOKEN",
-    "OPENCLAW_MCP_COMMAND",
-    "OPENCLAW_MCP_MODE",
-    "OPENCLAW_MCP_URL",
     "OPENSRE_LLM_AUTH_METADATA_PATH",
     "OPENSRE_PROJECT_ENV_PATH",
     "OPENSRE_RELEASES_API_URL",
@@ -466,7 +466,7 @@ def test_opensre_landing_page_smoke(cli_sandbox: CliSandbox) -> None:
 
     assert result.exit_code == 0
     assert "Quick start:" in result.stdout
-    assert "opensre investigate -i alert.json" in result.stdout
+    assert "opensre ask" in result.stdout
 
 
 def test_opensre_help_smoke(cli_sandbox: CliSandbox) -> None:
@@ -529,75 +529,6 @@ def test_update_check_smoke_uses_local_stub(cli_sandbox: CliSandbox, release_api
     assert "9999.0.0" in result.stdout
 
 
-def test_investigate_print_template_smoke(cli_sandbox: CliSandbox) -> None:
-    result = _run_cli(cli_sandbox, "investigate", "--print-template", "generic")
-
-    assert result.exit_code == 0
-    payload = json.loads(result.stdout)
-    assert payload["alert_source"] == "generic"
-    assert payload["message"]
-
-
-def test_investigate_print_template_new_relic_smoke(cli_sandbox: CliSandbox) -> None:
-    result = _run_cli(cli_sandbox, "investigate", "--print-template", "new_relic")
-
-    assert result.exit_code == 0
-    payload = json.loads(result.stdout)
-    assert payload["alert_source"] == "new_relic"
-    assert payload["message"]
-
-
-def test_investigate_onboard_handoff_smoke(cli_sandbox: CliSandbox, tmp_path: Path) -> None:
-    """project.env written by onboard is read by investigate before it reaches the LLM.
-
-    Only the project .env handoff is exercised here — investigate reads
-    LLM_PROVIDER and model env vars from that file, not from the wizard store.
-    No real API key is required. The test proves the plumbing works by asserting
-    the CLI reaches the LLM credential check (exit 1 + ANTHROPIC_API_KEY named
-    in the error) rather than crashing in config loading or file parsing.
-
-    LLM_PROVIDER is passed explicitly via extra_env so the assertion holds even
-    on CI runners where the variable is set to a different provider in the
-    parent environment.
-    """
-    cli_sandbox.seed_project_env(provider="anthropic", model="claude-opus-4-7")
-
-    alert_path = tmp_path / "alert.json"
-    alert_path.write_text(
-        json.dumps(
-            {
-                "alert_name": "High CPU on orders-rds-prod",
-                "pipeline_name": "orders",
-                "severity": "critical",
-                "message": "CPU utilisation exceeded 90% for 5 minutes.",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    result = _run_cli(
-        cli_sandbox,
-        "investigate",
-        "-i",
-        str(alert_path),
-        extra_env={"LLM_PROVIDER": "anthropic"},
-        # Full CLI boot (adapters + verifiers) then fail closed on credentials.
-        # Under loaded ``test-cov`` (xdist + coverage) a cold subprocess can
-        # exceed the default 15s budget even though the happy path is ~3s.
-        timeout=60.0,
-    )
-
-    # Exit 1 is expected — no real API key in CI.
-    assert result.exit_code == 1
-    # The failure must name the missing credential specifically — not a generic
-    # "run opensre onboard" fallback that would also appear when config loading
-    # itself is broken (the scenario this test is designed to catch).
-    combined = result.stdout + result.stderr
-    assert "ANTHROPIC_API_KEY" in combined, (
-        f"Expected a missing-credential error naming ANTHROPIC_API_KEY, got:\n{combined}"
-    )
-
-
 def test_integrations_list_and_show_smoke(cli_sandbox: CliSandbox) -> None:
     cli_sandbox.seed_integrations(
         [
@@ -627,6 +558,40 @@ def test_integrations_list_and_show_smoke(cli_sandbox: CliSandbox) -> None:
     assert '"app_key": "dd-a****"' in show_result.stdout
 
 
+def test_integrations_show_and_remove_retired_service_smoke(
+    cli_sandbox: CliSandbox,
+) -> None:
+    service = "retired-observer"
+    cli_sandbox.seed_integrations(
+        [
+            {
+                "id": "retired-local",
+                "service": service,
+                "status": "active",
+                "credentials": {"api_key": "retired-secret"},
+            }
+        ]
+    )
+
+    show_result = _run_cli(cli_sandbox, "integrations", "show", service)
+    remove_result = _run_cli(
+        cli_sandbox,
+        "--yes",
+        "integrations",
+        "remove",
+        service,
+    )
+    list_result = _run_cli(cli_sandbox, "integrations", "list")
+
+    assert show_result.exit_code == 0
+    assert f'"service": "{service}"' in show_result.stdout
+    assert '"api_key": "reti****"' in show_result.stdout
+    assert remove_result.exit_code == 0
+    assert f"Removed '{service}'." in remove_result.stdout
+    assert list_result.exit_code == 0
+    assert "No integrations." in list_result.stdout
+
+
 def test_integrations_verify_datadog_smoke(cli_sandbox: CliSandbox) -> None:
     cli_sandbox.seed_integrations(
         [
@@ -650,20 +615,45 @@ def test_integrations_verify_datadog_smoke(cli_sandbox: CliSandbox) -> None:
     assert "Missing API key or application key." in result.stdout
 
 
-def test_tests_inventory_commands_smoke(cli_sandbox: CliSandbox) -> None:
-    list_result = _run_cli(cli_sandbox, "tests", "list", "--category", "ci-safe")
-    run_result = _run_cli(cli_sandbox, "tests", "run", "make:test-cov", "--dry-run")
+@pytest.fixture()
+def rejected_provider_endpoint() -> Iterator[tuple[str, list[str]]]:
+    """Exercise credential rejection without sending the probe to a provider."""
+    requests: list[str] = []
 
-    assert list_result.exit_code == 0
-    assert "make:test-cov" in list_result.stdout
-    assert "make:test-full" in list_result.stdout
+    class Handler(BaseHTTPRequestHandler):
+        def do_CONNECT(self) -> None:
+            requests.append(self.path)
+            self.send_error(HTTPStatus.FORBIDDEN, "Provider connections blocked by test")
 
-    assert run_result.exit_code == 0
-    assert "make test-cov" in run_result.stdout
+        def do_POST(self) -> None:
+            requests.append(self.path)
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            payload = b'{"error":{"message":"Invalid test key","type":"authentication_error"}}'
+            self.send_response(HTTPStatus.UNAUTHORIZED)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/v1", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="interactive smoke uses POSIX PTYs")
-def test_onboard_interactive_smoke(cli_sandbox: CliSandbox) -> None:
+def test_onboard_interactive_smoke(
+    cli_sandbox: CliSandbox, rejected_provider_endpoint: tuple[str, list[str]]
+) -> None:
+    probe_url, probe_requests = rejected_provider_endpoint
     result = _run_cli_pty(
         cli_sandbox,
         "onboard",
@@ -673,25 +663,23 @@ def test_onboard_interactive_smoke(cli_sandbox: CliSandbox) -> None:
             # against the model that actually gets persisted.
             PtyAction(expect="Choose OpenAI model", send=b"\r"),
             PtyAction(expect="OpenAI API key", send=b"smoke-test-key\r"),
-            # #3591: the wizard now live-validates the key; smoke-test-key fails
-            # (401 online, connection error offline — the menu renders either way).
-            # One `j` moves from the default "Re-enter the API key" to "Save anyway
-            # without validating", which keeps the keyring persistence path and every
-            # downstream assertion intact. The per-action timeout covers a hanging
-            # network: the validator's client timeout is 30s and connection errors
-            # are retried (the CLI login expect below already uses 90.0 as well).
+            # The local probe returns 401; choose "Save anyway without validating"
+            # to exercise credential persistence after an explicit rejection.
             PtyAction(
                 expect="could not be verified. What next?",
                 send=b"\r",
                 stagger_j=1,
-                timeout=90.0,
             ),
         ],
         timeout=30.0,
-        extra_env={"OPENSRE_AUTO_LAUNCH": "0"},
+        extra_env={
+            "OPENSRE_AUTO_LAUNCH": "0",
+            "OPENAI_BASE_URL": probe_url,
+        },
     )
 
     assert result.exit_code == 0
+    assert probe_requests
     assert "Done." in result.stdout
     assert "next" in result.stdout
 
@@ -721,6 +709,7 @@ def test_onboard_interactive_smoke(cli_sandbox: CliSandbox) -> None:
 @pytest.mark.skipif(os.name == "nt", reason="interactive smoke uses POSIX PTYs")
 def test_onboard_interactive_smoke_cli_provider_repick_when_unauthenticated(
     cli_sandbox: CliSandbox,
+    rejected_provider_endpoint: tuple[str, list[str]],
     _cli_binary: str,
     provider_key: str,
     provider_label: str,
@@ -736,6 +725,7 @@ def test_onboard_interactive_smoke_cli_provider_repick_when_unauthenticated(
     from surfaces.cli.wizard.custom_endpoints import CUSTOM_ENDPOINT_SELECTION
     from surfaces.shared.llm_setup.provider_choices import other_setup_provider_options
 
+    probe_url, probe_requests = rejected_provider_endpoint
     other_values = [
         CUSTOM_ENDPOINT_SELECTION,
         *(
@@ -803,7 +793,7 @@ def test_onboard_interactive_smoke_cli_provider_repick_when_unauthenticated(
                 "OPENAI_API_KEY": "",
                 "OPENAI_ORG_ID": "",
                 "OPENAI_PROJECT_ID": "",
-                "OPENAI_BASE_URL": "",
+                "OPENAI_BASE_URL": probe_url,
             },
         )
     except AssertionError as exc:
@@ -817,6 +807,7 @@ def test_onboard_interactive_smoke_cli_provider_repick_when_unauthenticated(
         raise
 
     assert result.exit_code == 0
+    assert probe_requests
     assert "Done." in result.stdout
     assert "next" in result.stdout
 
@@ -832,6 +823,7 @@ def test_onboard_interactive_smoke_cli_provider_repick_when_unauthenticated(
 @pytest.mark.skipif(os.name == "nt", reason="interactive smoke uses POSIX PTYs")
 def test_integrations_setup_datadog_rejects_credentials_that_do_not_verify(
     cli_sandbox: CliSandbox,
+    rejected_provider_endpoint: tuple[str, list[str]],
 ) -> None:
     """Placeholder keys must leave nothing behind, on any tier.
 
@@ -840,6 +832,8 @@ def test_integrations_setup_datadog_rejects_credentials_that_do_not_verify(
     setup flow verifies before it persists; with keys the Datadog API rejects,
     the store and ``.env`` are expected to stay untouched.
     """
+    probe_url, probe_requests = rejected_provider_endpoint
+    proxy_url = probe_url.removesuffix("/v1")
     result = _run_cli_pty(
         cli_sandbox,
         "integrations",
@@ -850,11 +844,18 @@ def test_integrations_setup_datadog_rejects_credentials_that_do_not_verify(
             PtyAction(expect="application key", send=b"dd-app-key\r"),
             PtyAction(expect="Site", send=b"\r"),
         ],
-        # Setup runs verify against the Datadog API; CI runners can exceed 20s.
+        # The loopback proxy rejects CONNECT without forwarding data to Datadog.
+        extra_env={
+            "HTTPS_PROXY": proxy_url,
+            "https_proxy": proxy_url,
+            "NO_PROXY": "",
+            "no_proxy": "",
+        },
         timeout=45.0,
     )
 
     assert result.exit_code == 1
+    assert probe_requests == ["api.datadoghq.com:443"]
     assert "Saved" not in result.stdout
     assert cli_sandbox.read_integrations() == []
     assert "DD_SITE" not in cli_sandbox.read_project_env()
@@ -888,20 +889,6 @@ def test_integrations_remove_datadog_interactive_smoke(cli_sandbox: CliSandbox) 
     assert result.exit_code == 0
     assert "Removed 'datadog'." in result.stdout
     assert cli_sandbox.read_integrations() == []
-
-
-@pytest.mark.skipif(os.name == "nt", reason="interactive smoke uses POSIX PTYs")
-def test_tests_interactive_launcher_smoke(cli_sandbox: CliSandbox) -> None:
-    # The prompt instruction reads "Esc exit"; Escape is the PTY-safe way to
-    # dismiss the prompt in automation (no SIGINT/raw-mode race conditions).
-    result = _run_cli_pty(
-        cli_sandbox,
-        "tests",
-        actions=[PtyAction(expect="Choose a test category:", send=b"\x1b")],
-    )
-
-    assert result.exit_code == 0
-    assert "Choose a test category:" in result.stdout
 
 
 def test_gateway_help_smoke(cli_sandbox: CliSandbox) -> None:

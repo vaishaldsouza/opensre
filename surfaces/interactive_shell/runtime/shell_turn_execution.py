@@ -14,9 +14,14 @@ from core.agent_harness import (
     ToolCallingTurnResult,
     TurnResult,
 )
+from core.agent_harness.spi.cancel import host_cancel_requested
 from core.agent_harness.spi.session_goal import (
     SessionGoal,
+    SessionGoalReason,
     format_session_goal_progress,
+    format_session_goal_status_line,
+    goal_paint_signature,
+    same_goal_identity,
 )
 from core.tool import ToolExecutionHooks
 from infrastructure.turn_host.turn_output import TurnOutput
@@ -25,8 +30,27 @@ from surfaces.interactive_shell.runtime.agent_harness_adapters import ShellOutpu
 from surfaces.interactive_shell.runtime.core.turn_accounting import ShellTurnAccounting
 from surfaces.interactive_shell.runtime.shell_agent import shell_agent_build_config
 from surfaces.interactive_shell.session import Session
-from surfaces.interactive_shell.telemetry import PromptRecorder
 from surfaces.shared.terminal.components.rendering import print_repl_text
+
+
+def goal_paint_text(goal: SessionGoal, session: Session) -> str:
+    """One status line per turn; the full block only when the goal itself changed.
+
+    The block (condition, reason, checklist) prints when a goal is first seen
+    and whenever its status, ticks, or checklist change. A repaint of a goal
+    already shown drops the condition, so it prints once per goal.
+    """
+    terminal = session.terminal
+    signature = goal_paint_signature(goal)
+    previous = terminal.goal_paint_signature
+    if goal.status == "active" and (
+        previous == signature or SessionGoalReason.is_working(goal.last_reason)
+    ):
+        return format_session_goal_status_line(goal, session=session)
+    terminal.goal_paint_signature = signature
+    return format_session_goal_progress(
+        goal, session=session, include_condition=not same_goal_identity(previous, signature)
+    )
 
 
 def execute_shell_turn(
@@ -34,7 +58,6 @@ def execute_shell_turn(
     session: Session,
     console: Console,
     *,
-    recorder: PromptRecorder | None,
     confirm_fn: Callable[[str], str] | None = None,
     is_tty: bool | None = None,
     request_exit: Callable[[], None] | None = None,
@@ -49,7 +72,9 @@ def execute_shell_turn(
     prompts. Pass a long-lived ``handler`` (the REPL builds one
     at startup) so the tool stack is not rebuilt every turn.
     """
-    resolved_output: TurnOutput = output if output is not None else ShellOutputSink(console)
+    resolved_output: TurnOutput = (
+        output if output is not None else ShellOutputSink(console, session)
+    )
     # The host reads per-turn tool hooks off the output, the same way a chat
     # transport supplies them.
     resolved_output.tool_hooks = tool_hooks  # type: ignore[attr-defined]
@@ -61,14 +86,14 @@ def execute_shell_turn(
         )
 
     def _on_progress(goal: SessionGoal) -> None:
-        rendered = format_session_goal_progress(goal, session=session)
+        rendered = goal_paint_text(goal, session)
         if rendered:
             # Checklist uses ``[x]`` / ``[ ]`` — Rich markup must stay off.
             # CRLF under patch_stdout(raw=True) so rows do not staircase.
             print_repl_text(console, rendered, markup=False)
 
     def _accounting(message: str) -> ShellTurnAccounting:
-        return ShellTurnAccounting(session=session, text=message, recorder=recorder)
+        return ShellTurnAccounting(session=session, text=message)
 
     result = handler.run(
         text,
@@ -82,19 +107,17 @@ def execute_shell_turn(
         on_progress=_on_progress,
     )
     if result is None:
-        # No agent work ran. The shell binds no admission hook and its sink
-        # carries no ``turn_cancel``, so for this caller the capacity gate is
-        # the only reason the host returns ``None`` — and it already said so on
-        # the output. Report a turn that ran nothing rather than inventing an
-        # answer.
+        # Admission stopped before agent work, at capacity or cancellation.
+        cancelled = host_cancel_requested(resolved_output)
         return TurnResult(
-            final_intent="cli_agent_at_capacity",
+            final_intent="cli_agent_cancelled" if cancelled else "cli_agent_at_capacity",
             action_result=ToolCallingTurnResult(
                 planned_count=0,
                 executed_count=0,
                 executed_success_count=0,
                 has_unhandled_clause=False,
                 handled=False,
+                cancelled=cancelled,
             ),
         )
     return result

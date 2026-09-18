@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 class LiteLLMAgentClient:
-    """LiteLLM-backed tool-calling client for the investigation agent loop."""
+    """LiteLLM-backed tool-calling client for the agent ReAct loop."""
 
     provider_name = "LiteLLM"
     auth_error_hint = "Check the provider API key configured for this model."
@@ -128,6 +128,10 @@ class LiteLLMAgentClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+            # One action per response (core.tool.execution). LiteLLM translates
+            # this per provider and drops it where unsupported instead of failing.
+            kwargs["parallel_tool_calls"] = False
+            kwargs["drop_params"] = True
         return kwargs
 
     def invoke(

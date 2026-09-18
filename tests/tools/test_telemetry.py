@@ -119,6 +119,22 @@ class ToolFailureCase:
     expected_source: str
 
 
+def _ci_repair_case(tool_name: str) -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        from integrations.github.tools.ci_repair_loop import tool as mod
+
+        mp.setattr(mod, "RepairStore", MagicMock(side_effect=RuntimeError("storage unavailable")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.github.tools.ci_repair_loop import tool as mod
+
+        if tool_name == "schedule_ci_repair_loop":
+            return mod.schedule_ci_repair_loop(demo=True)
+        return mod.get_ci_repair_loop(task_id="a" * 12)
+
+    return ToolFailureCase(tool_name, patch, invoke, tool_name, "github")
+
+
 def _azure_case() -> ToolFailureCase:
     def patch(mp: pytest.MonkeyPatch) -> None:
         from integrations.azure.tools import azure_monitor_logs_tool as mod
@@ -305,6 +321,48 @@ def _github_star_history_case() -> ToolFailureCase:
     )
 
 
+def _github_ci_analytics_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        from integrations.github.client import GitHubApiError
+        from integrations.github.tools.ci_analytics import analysis as mod
+
+        mp.setattr(mod, "collect_runs", MagicMock(side_effect=GitHubApiError("boom")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.github.tools.ci_analytics.tool import analyze_github_ci_reliability
+
+        return analyze_github_ci_reliability(owner="o", repo="r", github_token="tok")
+
+    return ToolFailureCase(
+        "github_ci_analytics",
+        patch,
+        invoke,
+        "analyze_github_ci_reliability",
+        "github",
+    )
+
+
+def _github_ci_health_scan_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        from integrations.github.client import GitHubApiError
+        from integrations.github.tools.ci_health_scan import tool as mod
+
+        mp.setattr(mod, "resolve_scope", MagicMock(side_effect=GitHubApiError("boom")))
+
+    def invoke() -> dict[str, Any]:
+        from integrations.github.tools.ci_health_scan.tool import scan_github_ci_health
+
+        return scan_github_ci_health(owners=["o"], github_token="tok")
+
+    return ToolFailureCase(
+        "github_ci_health_scan",
+        patch,
+        invoke,
+        "scan_github_ci_health",
+        "github",
+    )
+
+
 def _eks_list_clusters_case() -> ToolFailureCase:
     def patch(mp: pytest.MonkeyPatch) -> None:
         from integrations.eks.tools import eks_list_clusters_tool as mod
@@ -473,107 +531,6 @@ def _eks_pod_logs_case() -> ToolFailureCase:
         )
 
     return ToolFailureCase("eks_pod_logs", patch, invoke, "get_eks_pod_logs", "eks")
-
-
-def _patch_openclaw_runtime(mp: pytest.MonkeyPatch) -> None:
-    """Shared patches for all OpenClaw cases — bypass the config/runtime guards.
-
-    Each test still patches the specific failure point afterwards.
-    """
-    from integrations.openclaw.tools import openclaw_mcp_tool as mod
-
-    mp.setattr(
-        mod,
-        "_resolve_config",
-        MagicMock(return_value=SimpleNamespace(mode="stdio", command="x", url="")),
-    )
-    mp.setattr(mod, "openclaw_runtime_unavailable_reason", MagicMock(return_value=None))
-    mp.setattr(mod, "describe_openclaw_error", MagicMock(return_value="mocked error"))
-
-
-def _openclaw_list_case() -> ToolFailureCase:
-    def patch(mp: pytest.MonkeyPatch) -> None:
-        from integrations.openclaw.tools import openclaw_mcp_tool as mod
-
-        _patch_openclaw_runtime(mp)
-        mp.setattr(mod, "list_openclaw_mcp_tools", MagicMock(side_effect=RuntimeError("mcp")))
-
-    def invoke() -> dict[str, Any]:
-        from integrations.openclaw.tools.openclaw_mcp_tool import list_openclaw_bridge_tools
-
-        return list_openclaw_bridge_tools()
-
-    return ToolFailureCase("openclaw_list_tools", patch, invoke, "list_openclaw_tools", "openclaw")
-
-
-def _openclaw_search_case() -> ToolFailureCase:
-    def patch(mp: pytest.MonkeyPatch) -> None:
-        from integrations.openclaw.tools import openclaw_mcp_tool as mod
-
-        _patch_openclaw_runtime(mp)
-        mp.setattr(mod, "invoke_openclaw_mcp_tool", MagicMock(side_effect=RuntimeError("mcp")))
-
-    def invoke() -> dict[str, Any]:
-        from integrations.openclaw.tools.openclaw_mcp_tool import search_openclaw_conversations
-
-        return search_openclaw_conversations(search="db error")
-
-    return ToolFailureCase(
-        "openclaw_search_conversations",
-        patch,
-        invoke,
-        "search_openclaw_conversations",
-        "openclaw",
-    )
-
-
-def _openclaw_get_conversation_case() -> ToolFailureCase:
-    """Exercises ``_normalize_named_bridge_call`` via ``get_openclaw_conversation``.
-
-    Verifies the helper's ``surface_tool_name`` plumbing — the Sentry
-    ``tool_name`` tag must be ``get_openclaw_conversation`` (the registered
-    surface name), not ``conversations_get`` (the MCP-side tool id).
-    """
-
-    def patch(mp: pytest.MonkeyPatch) -> None:
-        from integrations.openclaw.tools import openclaw_mcp_tool as mod
-
-        _patch_openclaw_runtime(mp)
-        mp.setattr(mod, "invoke_openclaw_mcp_tool", MagicMock(side_effect=RuntimeError("mcp")))
-
-    def invoke() -> dict[str, Any]:
-        from integrations.openclaw.tools.openclaw_mcp_tool import get_openclaw_conversation
-
-        return get_openclaw_conversation(conversation_id="conv-1")
-
-    return ToolFailureCase(
-        "openclaw_get_conversation",
-        patch,
-        invoke,
-        "get_openclaw_conversation",
-        "openclaw",
-    )
-
-
-def _openclaw_call_tool_case() -> ToolFailureCase:
-    def patch(mp: pytest.MonkeyPatch) -> None:
-        from integrations.openclaw.tools import openclaw_mcp_tool as mod
-
-        _patch_openclaw_runtime(mp)
-        mp.setattr(mod, "invoke_openclaw_mcp_tool", MagicMock(side_effect=RuntimeError("mcp")))
-
-    def invoke() -> dict[str, Any]:
-        from integrations.openclaw.tools.openclaw_mcp_tool import call_openclaw_bridge_tool
-
-        return call_openclaw_bridge_tool(tool_name="permissions_grant", arguments={})
-
-    return ToolFailureCase(
-        "openclaw_call_tool",
-        patch,
-        invoke,
-        "call_openclaw_tool",
-        "openclaw",
-    )
 
 
 def _patch_posthog_mcp_runtime(mp: pytest.MonkeyPatch) -> None:
@@ -777,8 +734,58 @@ def _x_mcp_call_tool_case() -> ToolFailureCase:
     )
 
 
+def _runbook_guidance_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        from tools.system.runbook_guidance_tool import tool as mod
+
+        mp.setattr(
+            mod,
+            "load_runbook_sources",
+            MagicMock(side_effect=RuntimeError("config")),
+        )
+
+    def invoke() -> dict[str, Any]:
+        from core.tool import AgentToolContext
+        from tools.system.runbook_guidance_tool import load_runbook_guidance
+
+        return load_runbook_guidance(
+            alertname="CheckoutDown",
+            context=AgentToolContext(resolved_integrations={}),
+        )
+
+    return ToolFailureCase(
+        "runbook_guidance",
+        patch,
+        invoke,
+        "load_runbook_guidance",
+        "knowledge",
+    )
+
+
+def _hosted_gateway_case() -> ToolFailureCase:
+    def patch(mp: pytest.MonkeyPatch) -> None:
+        from integrations.hosted_gateway import HostedGatewayError
+        from integrations.hosted_gateway.tools import gateway_health as mod
+
+        mp.setattr(
+            mod.HostedGatewayClient,
+            "from_account",
+            MagicMock(side_effect=HostedGatewayError("unreachable")),
+        )
+
+    def invoke() -> dict[str, Any]:
+        from integrations.hosted_gateway.tools.gateway_health import check_hosted_gateway
+
+        return check_hosted_gateway()
+
+    return ToolFailureCase("check_hosted_gateway", patch, invoke, "check_hosted_gateway", "opensre")
+
+
 _TOOL_FAILURE_CASES: list[ToolFailureCase] = [
     _azure_case(),
+    _hosted_gateway_case(),
+    _ci_repair_case("schedule_ci_repair_loop"),
+    _ci_repair_case("get_ci_repair_loop"),
     _openobserve_case(),
     _snowflake_case(),
     _cloudwatch_logs_case(),
@@ -786,6 +793,8 @@ _TOOL_FAILURE_CASES: list[ToolFailureCase] = [
     _google_docs_case(),
     _github_repository_case(),
     _github_star_history_case(),
+    _github_ci_analytics_case(),
+    _github_ci_health_scan_case(),
     _eks_list_clusters_case(),
     _eks_describe_cluster_case(),
     _eks_nodegroup_case(),
@@ -796,16 +805,13 @@ _TOOL_FAILURE_CASES: list[ToolFailureCase] = [
     _eks_list_deployments_case(),
     _eks_list_pods_case(),
     _eks_pod_logs_case(),
-    _openclaw_list_case(),
-    _openclaw_search_case(),
-    _openclaw_get_conversation_case(),
-    _openclaw_call_tool_case(),
     _posthog_mcp_list_case(),
     _posthog_mcp_call_tool_case(),
     _sentry_mcp_list_case(),
     _sentry_mcp_call_tool_case(),
     _x_mcp_list_case(),
     _x_mcp_call_tool_case(),
+    _runbook_guidance_case(),
 ]
 
 
@@ -979,6 +985,11 @@ _MIGRATED_TOOL_NAMES: frozenset[str] = frozenset(
         "create_google_docs_incident_report",
         "get_github_repository",
         "get_github_star_history",
+        "analyze_github_ci_reliability",
+        "scan_github_ci_health",
+        "schedule_ci_repair_loop",
+        "get_ci_repair_loop",
+        "check_hosted_gateway",
         # EKS — enumerated in #1463
         "list_eks_clusters",
         "describe_eks_cluster",
@@ -991,14 +1002,6 @@ _MIGRATED_TOOL_NAMES: frozenset[str] = frozenset(
         "get_eks_node_health",
         "list_eks_namespaces",
         "list_eks_deployments",
-        # OpenClaw — all four swallow sites in OpenClawMCPTool/__init__.py.
-        # ``send_openclaw_message`` and ``get_openclaw_conversation`` share
-        # ``_normalize_named_bridge_call`` via the ``surface_tool_name`` arg.
-        "list_openclaw_tools",
-        "search_openclaw_conversations",
-        "get_openclaw_conversation",
-        "send_openclaw_message",
-        "call_openclaw_tool",
         # PostHog MCP — both swallow sites in PostHogMCPTool/__init__.py.
         "list_posthog_tools",
         "call_posthog_tool",
@@ -1008,6 +1011,7 @@ _MIGRATED_TOOL_NAMES: frozenset[str] = frozenset(
         # X MCP — both swallow sites in x_mcp_tool/__init__.py.
         "list_x_tools",
         "call_x_tool",
+        "load_runbook_guidance",
     }
 )
 
@@ -1023,9 +1027,21 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         # there as an external registry package and are only loaded when the
         # bench is actively imported, so they don't appear in the production
         # registry that this test enumerates.
-        "alert_sample",
         "alertmanager_alerts",
         "alertmanager_silences",
+        # count_files catches only FileCountError (missing path, not a
+        # directory); an unexpected walk error reaches the global wrapper.
+        "count_files",
+        # read_structured_file catches only StructureError (unreadable file,
+        # unknown key); a parser failure it did not anticipate reaches the
+        # global wrapper.
+        "read_structured_file",
+        # scan_local_git_workspace shells out to git per repository and lets
+        # anything unexpected reach the global wrapper.
+        "scan_local_git_workspace",
+        # schedule_ci_reliability_loop writes the local task store; only a bad
+        # time is caught, anything else reaches the global wrapper.
+        "schedule_ci_reliability_loop",
         # architecture_* catch only WorkspaceError / ReportPersistenceError for
         # known failure states; unexpected errors escape to the #1476 wrapper.
         "architecture_cleanup_repo",
@@ -1060,6 +1076,9 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "fix_sentry_issue_start",
         "generate_work_status_report",
         "github_cli",
+        # resolve_merge_conflicts catches only its own ResolveMergeError for
+        # known states; unexpected errors escape to the global #1476 wrapper.
+        "resolve_merge_conflicts",
         "get_airflow_dag_runs",
         "get_airflow_metrics",
         "get_airflow_task_instances",
@@ -1083,25 +1102,6 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "get_github_repository_tree",
         "get_gitlab_file",
         "get_groundcover_query_reference",
-        "get_hermes_adapter_catalog",
-        "get_hermes_approval_events",
-        "get_hermes_audit_trail",
-        "get_hermes_config",
-        "get_hermes_credential_state",
-        "get_hermes_cron_state",
-        "get_hermes_filesystem_state",
-        "get_hermes_kv_cache_state",
-        "get_hermes_logs",
-        "get_hermes_memory_state",
-        "get_hermes_message_history",
-        "get_hermes_orchestration_state",
-        "get_hermes_provider_traffic",
-        "get_hermes_rbac_state",
-        "get_hermes_routing_decisions",
-        "get_hermes_runtime_state",
-        "get_hermes_session_log",
-        "get_hermes_session_topology",
-        "get_hermes_workflow_run",
         "get_host_metrics",
         "get_jenkins_build_log",
         "get_jenkins_pipeline_stages",
@@ -1170,7 +1170,6 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "inspect_lambda_function",
         "inspect_s3_object",
         "inspect_railway_deployment",
-        "investigation_start",
         "jira_add_comment",
         "jira_create_issue",
         "jira_issue_detail",
@@ -1249,7 +1248,6 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "query_yc_metrics",
         "redeploy_railway_service",
         "replay_slack_thread_locally",
-        "run_investigation",
         "scan_redis_keys",
         "search_bitbucket_code",
         "search_github_code",
@@ -1257,6 +1255,7 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "search_sentry_issues",
         "shell_run",
         "skill_view",
+        "session_goal_complete",
         "session_goal_set",
         "propose_scheduled_delivery",
         "slack_add_reaction",
@@ -1270,7 +1269,6 @@ _TOOLS_WITHOUT_DELIBERATE_CATCH: frozenset[str] = frozenset(
         "slash_invoke",
         "summarize_community_followups",
         "summarize_github_pr_status",
-        "synthetic_run",
         "task_cancel",
         # update_plan returns structured invalid-plan dicts; unexpected
         # exceptions escape to the global wrapper.
@@ -1362,16 +1360,9 @@ def test_every_registered_tool_is_migrated_or_allowlisted() -> None:
 
 
 def test_every_migrated_tool_has_a_parameterised_failure_case() -> None:
-    """Each migrated tool must have a regression test in ``_TOOL_FAILURE_CASES``.
-
-    ``send_openclaw_message`` is the documented exception: it shares
-    ``_normalize_named_bridge_call`` with ``get_openclaw_conversation``,
-    and the latter's case already exercises that helper's
-    ``report_run_error`` path.
-    """
+    """Each migrated tool must have a regression test in ``_TOOL_FAILURE_CASES``."""
     covered_by_parametrised = {case.expected_tool_name for case in _TOOL_FAILURE_CASES}
-    shared_code_path = {"send_openclaw_message"}
-    missing = _MIGRATED_TOOL_NAMES - covered_by_parametrised - shared_code_path
+    missing = _MIGRATED_TOOL_NAMES - covered_by_parametrised
     assert missing == set(), (
         "Every name in _MIGRATED_TOOL_NAMES must have a parameterised "
         "failure case in _TOOL_FAILURE_CASES (unless it shares a code path "

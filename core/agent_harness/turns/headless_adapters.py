@@ -16,10 +16,7 @@ from core.agent_harness.ports import (
     ToolEventObserver,
 )
 from core.agent_harness.session.history_entry import build_history_entry
-from core.agent_harness.session.pending_offer import (
-    PendingInvestigationOffer,
-    PendingScheduleOffer,
-)
+from core.agent_harness.session.pending_offer import PendingScheduleOffer
 from core.agent_harness.turns.turn_results import (
     ToolCallingTurnResult,
     TurnResult,
@@ -34,10 +31,7 @@ class InMemorySessionState:
     cli_agent_messages: list[tuple[str, str]] = field(default_factory=list)
     configured_integrations: list[str] = field(default_factory=list)
     configured_integrations_known: bool = False
-    last_state: dict[str, Any] | None = None
-    last_synthetic_observation_path: str | None = None
     pending_schedule_offer: PendingScheduleOffer | None = None
-    pending_investigation_offer: PendingInvestigationOffer | None = None
     reasoning_effort: Any | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
     last_command_observation: str | None = None
@@ -129,9 +123,6 @@ class EmptyPromptContextProvider:
         _ = query
         return ""
 
-    def investigation_flow(self) -> str:
-        return ""
-
     def runtime_facts(self) -> Mapping[str, Any]:
         from config.runtime_metadata import capture_runtime_facts
 
@@ -167,8 +158,9 @@ class NullToolProvider:
         confirm_fn: ConfirmFn | None,
         is_tty: bool | None,
         resolved_integrations: dict[str, Any] | None = None,
+        turn_user_message: str = "",
     ) -> list[Any]:
-        _ = (confirm_fn, is_tty, resolved_integrations)
+        _ = (confirm_fn, is_tty, resolved_integrations, turn_user_message)
         return []
 
     def tool_resources(self) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-"""GitHub-only browser authentication for a local OpenSRE installation."""
+"""Browser authentication for a local OpenSRE installation."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from datetime import UTC, datetime
 from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
-from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from typing import Any, Protocol
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 
@@ -28,49 +28,57 @@ from config.account import (
     delete_account_record,
     delete_account_token,
     load_account_record,
-    resolve_account_token,
+    normalize_account_app_url,
     save_account_record,
     save_account_token,
     stored_account_token,
 )
 from config.constants.account import (
+    OPENSRE_ACCOUNT_EXCHANGE_PATH,
+    OPENSRE_ACCOUNT_HTTP_TIMEOUT_SECONDS,
+    OPENSRE_ACCOUNT_LOGIN_PATH,
+    OPENSRE_ACCOUNT_LOGIN_SUCCESS_PATH,
+    OPENSRE_ACCOUNT_SESSION_PATH,
     OPENSRE_ACCOUNT_TOKEN_ENV,
-    OPENSRE_APP_URL_DEFAULT,
-    OPENSRE_APP_URL_ENV,
+    OPENSRE_ACCOUNT_USAGE_PATH,
 )
-from integrations.github import (
-    PersonalGitHubSnapshot,
-    configure_personal_github,
-    disconnect_personal_github,
-    restore_personal_github,
-)
-
-_LOGIN_PATH = "/cli/auth/github"
-_EXCHANGE_PATH = "/api/auth/github/cli/exchange"
-_SESSION_PATH = "/api/auth/github/cli/session"
-_SUCCESS_PATH = "/cli/auth/github/success"
-_HTTP_TIMEOUT_SECONDS = 15.0
 
 
 class AccountAuthError(RuntimeError):
     """Personal account authentication could not complete safely."""
 
 
+class LoginProgress(Protocol):
+    """User-facing progress for OpenSRE account login."""
+
+    def prompt_sign_in(self, url: str, *, opened: bool) -> None:
+        """Show the sign-in URL, numbered browser steps, and wait state."""
+
+    def authorization_received(self) -> None:
+        """Show that the loopback callback arrived and setup continues."""
+
+    def setup_complete(self) -> None:
+        """Show that the account and hosted model are ready."""
+
+
+class _SilentLoginProgress:
+    def prompt_sign_in(self, url: str, *, opened: bool) -> None:
+        _ = (url, opened)
+
+    def authorization_received(self) -> None:
+        return
+
+    def setup_complete(self) -> None:
+        return
+
+
 @dataclass(frozen=True)
 class AccountLoginResult:
-    """Successful account login and the GitHub scopes it supplied."""
+    """Successful account login and any local warning it supplied."""
 
     record: AccountRecord
     warning: str = ""
-
-
-@dataclass(frozen=True)
-class AccountStatus:
-    """Local and remote state for the current personal account."""
-
-    authenticated: bool
-    record: AccountRecord | None
-    detail: str
+    effective_token_matches_login: bool = True
 
 
 @dataclass(frozen=True)
@@ -93,9 +101,6 @@ class _ExchangeResult:
     token_expires_at: str
     user_id: str
     organization_id: str
-    github_username: str
-    github_access_token: str
-    github_scopes: tuple[str, ...]
     llm_provider: str
     llm_model: str
     email: str | None
@@ -103,21 +108,10 @@ class _ExchangeResult:
 
 def normalize_app_url(value: str | None = None) -> str:
     """Resolve and validate the webapp origin used for account authentication."""
-    raw = (value or os.getenv(OPENSRE_APP_URL_ENV) or OPENSRE_APP_URL_DEFAULT).strip()
-    parsed = urlsplit(raw)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise AccountAuthError(
-            f"Invalid OpenSRE app URL. Set {OPENSRE_APP_URL_ENV} to an http(s) origin."
-        )
-    path = parsed.path.rstrip("/")
-    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+    try:
+        return normalize_account_app_url(value)
+    except ValueError as exc:
+        raise AccountAuthError(str(exc)) from exc
 
 
 def _app_endpoint(app_url: str, path: str) -> str:
@@ -139,7 +133,7 @@ def _login_url(app_url: str, *, callback_port: int, state: str, code_challenge: 
             "code_challenge": code_challenge,
         }
     )
-    return f"{_app_endpoint(app_url, _LOGIN_PATH)}?{query}"
+    return f"{_app_endpoint(app_url, OPENSRE_ACCOUNT_LOGIN_PATH)}?{query}"
 
 
 class _LoopbackCallback(BaseHTTPRequestHandler):
@@ -200,7 +194,7 @@ def _wait_for_callback(
             return results.get_nowait()
         except queue.Empty:
             continue
-    raise AccountAuthError("Timed out waiting for GitHub sign-in to finish.")
+    raise AccountAuthError("Timed out waiting for OpenSRE sign-in to finish.")
 
 
 def _required_string(value: Mapping[str, object], key: str) -> str:
@@ -222,14 +216,10 @@ def _decode_exchange(payload: object) -> _ExchangeResult:
         raise AccountAuthError("The OpenSRE app returned an invalid login response.")
     user = _mapping(payload, "user")
     organization = _mapping(payload, "organization")
-    github = _mapping(payload, "github")
     llm = _mapping(payload, "llm")
     raw_email = user.get("email")
     if raw_email is not None and not isinstance(raw_email, str):
         raise AccountAuthError("The OpenSRE app returned an invalid login response.")
-    raw_scopes = github.get("scopes", [])
-    if not isinstance(raw_scopes, list) or not all(isinstance(scope, str) for scope in raw_scopes):
-        raise AccountAuthError("The OpenSRE app returned invalid GitHub scopes.")
     llm_provider = _required_string(llm, "provider").lower()
     if llm_provider != "openai":
         raise AccountAuthError("The OpenSRE app returned an unsupported LLM provider.")
@@ -238,39 +228,19 @@ def _decode_exchange(payload: object) -> _ExchangeResult:
         token_expires_at=_required_string(payload, "expires_at"),
         user_id=_required_string(user, "id"),
         organization_id=_required_string(organization, "id"),
-        github_username=_required_string(github, "username"),
-        github_access_token=_required_string(github, "access_token"),
-        github_scopes=tuple(sorted(set(raw_scopes))),
         llm_provider=llm_provider,
         llm_model=_required_string(llm, "model"),
         email=raw_email.strip() if isinstance(raw_email, str) and raw_email.strip() else None,
     )
 
 
-def _configure_hosted_openai(model: str) -> None:
-    """Select the account-backed OpenAI route for every local LLM role."""
-    from surfaces.shared.llm_setup.catalog import PROVIDER_BY_VALUE
-    from surfaces.shared.llm_setup.env_sync import sync_provider_env
-
-    provider = PROVIDER_BY_VALUE["openai"]
-    extra_env = (
-        {provider.classification_model_env: model} if provider.classification_model_env else None
-    )
-    sync_provider_env(
-        provider=provider,
-        model=model,
-        toolcall_model=model,
-        extra_env=extra_env,
-    )
-
-
 def _exchange_code(app_url: str, code: str, verifier: str) -> _ExchangeResult:
     try:
         response = httpx.post(
-            _app_endpoint(app_url, _EXCHANGE_PATH),
+            _app_endpoint(app_url, OPENSRE_ACCOUNT_EXCHANGE_PATH),
             json={"code": code, "code_verifier": verifier},
             headers={"Accept": "application/json"},
-            timeout=_HTTP_TIMEOUT_SECONDS,
+            timeout=OPENSRE_ACCOUNT_HTTP_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         return _decode_exchange(response.json())
@@ -281,19 +251,16 @@ def _exchange_code(app_url: str, code: str, verifier: str) -> _ExchangeResult:
 def _revoke_remote(app_url: str, token: str) -> bool:
     try:
         response = httpx.delete(
-            _app_endpoint(app_url, _SESSION_PATH),
+            _app_endpoint(app_url, OPENSRE_ACCOUNT_SESSION_PATH),
             headers={"Authorization": f"Bearer {token}"},
-            timeout=_HTTP_TIMEOUT_SECONDS,
+            timeout=OPENSRE_ACCOUNT_HTTP_TIMEOUT_SECONDS,
         )
         return response.status_code in {HTTPStatus.NO_CONTENT, HTTPStatus.UNAUTHORIZED}
     except httpx.HTTPError:
         return False
 
 
-def _restore_previous_account(
-    record: AccountRecord | None, token: str, github: PersonalGitHubSnapshot
-) -> None:
-    restore_personal_github(github)
+def _restore_previous_account(record: AccountRecord | None, token: str) -> None:
     if token:
         save_account_token(token)
     else:
@@ -310,11 +277,40 @@ def _cleanup_failed_login(
     *,
     previous_record: AccountRecord | None,
     previous_token: str,
-    github_snapshot: PersonalGitHubSnapshot,
 ) -> None:
     _revoke_remote(app_url, access_token)
     with suppress(Exception):
-        _restore_previous_account(previous_record, previous_token, github_snapshot)
+        _restore_previous_account(previous_record, previous_token)
+
+
+def usage_page_url(app_url: str | None = None) -> str:
+    """The credits, usage and top-up page of the deployment the account signed in to.
+
+    An explicit ``app_url`` wins; otherwise the URL saved with the login, so a
+    custom deployment's account is not sent to the production site.
+    """
+    if not app_url:
+        record = load_account_record()
+        app_url = record.app_url if record is not None else None
+    return _app_endpoint(normalize_app_url(app_url), OPENSRE_ACCOUNT_USAGE_PATH)
+
+
+def open_usage_page(
+    *,
+    app_url: str | None = None,
+    browser_open: Callable[[str], bool] | None = None,
+) -> tuple[str, bool]:
+    """Open the usage page in the browser; return ``(url, opened)``."""
+    url = usage_page_url(app_url)
+    opener = browser_open if browser_open is not None else webbrowser.open
+    try:
+        opened = bool(opener(url))
+    except Exception:
+        opened = False
+    from infrastructure.analytics.capture import capture_browser_open_requested
+
+    capture_browser_open_requested(target="account_usage", opened=opened)
+    return url, opened
 
 
 def login_account(
@@ -322,10 +318,11 @@ def login_account(
     app_url: str | None = None,
     open_browser: bool = True,
     timeout_seconds: float = 300.0,
-    announce: Callable[[str], None] = print,
+    progress: LoginProgress | None = None,
     browser_open: Callable[[str], bool] = webbrowser.open,
 ) -> AccountLoginResult:
-    """Complete GitHub OAuth in a browser and persist the local account safely."""
+    """Complete webapp authentication and persist the local account safely."""
+    reporter = progress if progress is not None else _SilentLoginProgress()
     if timeout_seconds <= 0:
         raise AccountAuthError("Login timeout must be greater than zero.")
     resolved_app_url = normalize_app_url(app_url)
@@ -337,7 +334,7 @@ def login_account(
         partial(
             _LoopbackCallback,
             expected_state=state,
-            success_url=_app_endpoint(resolved_app_url, _SUCCESS_PATH),
+            success_url=_app_endpoint(resolved_app_url, OPENSRE_ACCOUNT_LOGIN_SUCCESS_PATH),
             results=results,
         ),
     )
@@ -349,94 +346,70 @@ def login_account(
             state=state,
             code_challenge=challenge,
         )
-        opened = open_browser and browser_open(authorization_url)
-        if not opened:
-            announce(f"Open this URL to sign in:\n{authorization_url}")
+        opened = False
+        if open_browser:
+            try:
+                opened = bool(browser_open(authorization_url))
+            finally:
+                from infrastructure.analytics.capture import capture_browser_open_requested
+
+                capture_browser_open_requested(target="account_login", opened=opened)
+        reporter.prompt_sign_in(authorization_url, opened=opened)
         callback = _wait_for_callback(server, results, timeout_seconds=timeout_seconds)
     finally:
         server.server_close()
 
     if callback.error:
-        raise AccountAuthError(f"GitHub sign-in failed: {callback.error}")
+        raise AccountAuthError(f"OpenSRE sign-in failed: {callback.error}")
 
+    reporter.authorization_received()
     exchange = _exchange_code(resolved_app_url, callback.code, verifier)
     previous_record = load_account_record()
     previous_token = stored_account_token()
     record = AccountRecord(
         user_id=exchange.user_id,
         organization_id=exchange.organization_id,
-        github_username=exchange.github_username,
         email=exchange.email,
         app_url=resolved_app_url,
         signed_in_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
         token_expires_at=exchange.token_expires_at,
         llm_provider=exchange.llm_provider,
         llm_model=exchange.llm_model,
-        github_scopes=exchange.github_scopes,
     )
-    try:
-        github_snapshot = configure_personal_github(
-            access_token=exchange.github_access_token,
-            username=exchange.github_username,
-        )
-    except Exception as exc:
-        _revoke_remote(resolved_app_url, exchange.access_token)
-        raise AccountAuthError("OpenSRE could not safely persist the GitHub login.") from exc
     try:
         save_account_token(exchange.access_token)
         save_account_record(record)
-        _configure_hosted_openai(exchange.llm_model)
     except Exception as exc:
         _cleanup_failed_login(
             resolved_app_url,
             exchange.access_token,
             previous_record=previous_record,
             previous_token=previous_token,
-            github_snapshot=github_snapshot,
         )
         raise AccountAuthError("OpenSRE could not safely persist the login.") from exc
+    from core.llm.factory import reset_llm_clients
+
+    reset_llm_clients()
+    reporter.setup_complete()
     if previous_token and previous_token != exchange.access_token:
         previous_app_url = previous_record.app_url if previous_record else resolved_app_url
         _revoke_remote(previous_app_url, previous_token)
     env_token = os.getenv(OPENSRE_ACCOUNT_TOKEN_ENV, "").strip()
     warning = ""
-    if env_token and env_token != exchange.access_token:
+    effective_token_matches_login = not env_token or secrets.compare_digest(
+        env_token,
+        exchange.access_token,
+    )
+    if not effective_token_matches_login:
         warning = (
             f"{OPENSRE_ACCOUNT_TOKEN_ENV} is set in your environment and will keep "
             "overriding the token just saved. Unset it so this login is used."
         )
-    return AccountLoginResult(record=record, warning=warning)
-
-
-def account_status(*, app_url: str | None = None) -> AccountStatus:
-    """Validate the stored account token and return user-safe status detail."""
-    record = load_account_record()
-    token = resolve_account_token()
-    if not token:
-        return AccountStatus(False, record, "No OpenSRE account token is stored.")
-    resolved_app_url = (
-        normalize_app_url(app_url)
-        if app_url
-        else (record.app_url if record else normalize_app_url())
+    return AccountLoginResult(
+        record=record,
+        warning=warning,
+        effective_token_matches_login=effective_token_matches_login,
     )
-    try:
-        response = httpx.get(
-            _app_endpoint(resolved_app_url, _SESSION_PATH),
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=_HTTP_TIMEOUT_SECONDS,
-        )
-    except httpx.HTTPError:
-        return AccountStatus(
-            False,
-            record,
-            "The local login exists, but the OpenSRE app could not be reached.",
-        )
-    if response.status_code == HTTPStatus.UNAUTHORIZED:
-        return AccountStatus(False, record, "The stored OpenSRE login has expired or was revoked.")
-    if response.status_code != HTTPStatus.OK:
-        return AccountStatus(False, record, "The OpenSRE app could not validate this login.")
-    provider = f"{record.llm_provider} ({record.llm_model})" if record else "openai"
-    return AccountStatus(True, record, f"Authenticated with GitHub; LLM provider: {provider}.")
 
 
 def logout_account() -> AccountLogoutResult:
@@ -448,11 +421,16 @@ def logout_account() -> AccountLogoutResult:
 
     try:
         delete_account_token()
-        if record:
-            disconnect_personal_github()
+        from integrations.github import disconnect_personal_github
+
+        disconnect_personal_github()
         delete_account_record()
     except Exception as exc:
         raise AccountAuthError("OpenSRE could not clear all local account data.") from exc
+
+    from core.llm.factory import reset_llm_clients
+
+    reset_llm_clients()
 
     if os.getenv(OPENSRE_ACCOUNT_TOKEN_ENV, "").strip():
         return AccountLogoutResult(
@@ -471,8 +449,7 @@ __all__ = [
     "AccountAuthError",
     "AccountLoginResult",
     "AccountLogoutResult",
-    "AccountStatus",
-    "account_status",
+    "LoginProgress",
     "login_account",
     "logout_account",
     "normalize_app_url",

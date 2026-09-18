@@ -56,31 +56,16 @@ jobs:
         if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
         run: uv sync --frozen --extra dev
 
-      - name: Lint
+      - name: Report pytest timing snapshot health
         if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
-        run: uv run python -m ruff check $PYTHON_SOURCE_PATHS tests/
+        run: |
+          uv run python -m tests.ci_sharding report --label=tools-runtime tests/tools tests/core core/agent_harness/prompts/skills tests/infrastructure tests/filestorage tests/utils tests/masking --ignore=tests/core/agent --ignore=tests/core/tool/test_contracts.py --ignore=tests/tools/test_registry_index.py --ignore=tests/tools/selection
+          uv run python -m tests.ci_sharding report --label=cli-runtime tests/cli tests/interactive_shell tests/surfaces tests/core/agent tests/fleet_monitoring tests/analytics tests/sandbox --ignore=tests/cli/test_smoke.py
+          uv run python -m tests.ci_sharding report --label=integrations-and-misc tests/integrations tests/bootstrap tests/benchmarks tests/shared tests/config tests/github_ci tests/quality tests/packaging tests/scheduler gateway/tests
 
-      - name: Format check
+      - name: Shared static checks
         if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
-        run: uv run python -m ruff format --check $PYTHON_SOURCE_PATHS tests/
-
-      - name: Verify integration registry (smoke)
-        if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
-        run: make verify-integrations-smoke
-
-      - name: Verify tool registry index
-        if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
-        run: uv run pytest -q tests/tools/test_registry_index.py
-
-      - name: Import graph
-        if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
-        run: uv run python .github/ci/check_imports.py --strict
-
-      # Full layered contracts (.importlinter.strict), not the minimal default
-      # .importlinter config used by ``make check-imports``.
-      - name: Import boundaries
-        if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
-        run: uv run lint-imports --config .importlinter.strict
+        run: uv run python .github/ci/run_checks.py --group static
 
   quality-typecheck:
     name: quality-typecheck
@@ -125,13 +110,9 @@ jobs:
         if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
         run: uv sync --frozen --extra dev
 
-      - name: Typecheck
+      - name: Shared type checks
         if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
-        run: uv run python -m mypy $PYTHON_SOURCE_PATHS
-
-      - name: Verify typed tool contracts
-        if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
-        run: uv run pytest -q tests/core/tool/test_contracts.py
+        run: uv run python .github/ci/run_checks.py --group types
 
   test:
     name: test (${{ matrix.shard }})
@@ -149,17 +130,16 @@ jobs:
               --ignore=tests/core/tool/test_contracts.py
               --ignore=tests/tools/test_registry_index.py
               --ignore=tests/tools/selection
-            split_args: >-
-              --ci-splits=6 --ci-group=1
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=1
             pytest_paths: >-
               tests/tools
               tests/core
+              core/agent_harness/prompts/skills
               tests/infrastructure
               tests/filestorage
               tests/utils
               tests/masking
-              tests/watch_dog
           - os: ubuntu-latest
             shard: tools-runtime-2
             extra_pytest_args: >-
@@ -167,17 +147,16 @@ jobs:
               --ignore=tests/core/tool/test_contracts.py
               --ignore=tests/tools/test_registry_index.py
               --ignore=tests/tools/selection
-            split_args: >-
-              --ci-splits=6 --ci-group=2
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=2
             pytest_paths: >-
               tests/tools
               tests/core
+              core/agent_harness/prompts/skills
               tests/infrastructure
               tests/filestorage
               tests/utils
               tests/masking
-              tests/watch_dog
           - os: ubuntu-latest
             shard: tools-runtime-3
             extra_pytest_args: >-
@@ -185,17 +164,16 @@ jobs:
               --ignore=tests/core/tool/test_contracts.py
               --ignore=tests/tools/test_registry_index.py
               --ignore=tests/tools/selection
-            split_args: >-
-              --ci-splits=6 --ci-group=3
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=3
             pytest_paths: >-
               tests/tools
               tests/core
+              core/agent_harness/prompts/skills
               tests/infrastructure
               tests/filestorage
               tests/utils
               tests/masking
-              tests/watch_dog
           - os: ubuntu-latest
             shard: tools-runtime-4
             extra_pytest_args: >-
@@ -203,17 +181,16 @@ jobs:
               --ignore=tests/core/tool/test_contracts.py
               --ignore=tests/tools/test_registry_index.py
               --ignore=tests/tools/selection
-            split_args: >-
-              --ci-splits=6 --ci-group=4
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=4
             pytest_paths: >-
               tests/tools
               tests/core
+              core/agent_harness/prompts/skills
               tests/infrastructure
               tests/filestorage
               tests/utils
               tests/masking
-              tests/watch_dog
           - os: ubuntu-latest
             shard: tools-runtime-5
             extra_pytest_args: >-
@@ -221,17 +198,16 @@ jobs:
               --ignore=tests/core/tool/test_contracts.py
               --ignore=tests/tools/test_registry_index.py
               --ignore=tests/tools/selection
-            split_args: >-
-              --ci-splits=6 --ci-group=5
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=5
             pytest_paths: >-
               tests/tools
               tests/core
+              core/agent_harness/prompts/skills
               tests/infrastructure
               tests/filestorage
               tests/utils
               tests/masking
-              tests/watch_dog
           - os: ubuntu-latest
             shard: tools-runtime-6
             extra_pytest_args: >-
@@ -239,21 +215,19 @@ jobs:
               --ignore=tests/core/tool/test_contracts.py
               --ignore=tests/tools/test_registry_index.py
               --ignore=tests/tools/selection
-            split_args: >-
-              --ci-splits=6 --ci-group=6
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=6
             pytest_paths: >-
               tests/tools
               tests/core
+              core/agent_harness/prompts/skills
               tests/infrastructure
               tests/filestorage
               tests/utils
               tests/masking
-              tests/watch_dog
           - os: ubuntu-latest
             shard: cli-runtime-1
-            # Live shell action-agent contracts are validated on openai,
-            # matching interactive-shell-live.yml. The
+            # Live shell action-agent contracts are validated on openai. The
             # default anthropic tool-call model (haiku) cannot reliably perform
             # compound action planning, so pin this shard to openai.
             # ``tests/core/agent`` runs here because it contains the live
@@ -263,135 +237,98 @@ jobs:
             # restructure (#3299) added.
             llm_provider: openai
             extra_pytest_args: >-
-              --ignore=tests/core/agent/test_turn_scenarios.py
               --ignore=tests/cli/test_smoke.py
-            split_args: >-
-              --ci-splits=6 --ci-group=1
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=1
             pytest_paths: >-
               tests/cli
               tests/interactive_shell
               tests/surfaces
-              tests/agent
               tests/core/agent
               tests/fleet_monitoring
               tests/analytics
-              tests/tools/investigation
-              tests/delivery
               tests/sandbox
-              tests/hermes
           - os: ubuntu-latest
             shard: cli-runtime-2
             llm_provider: openai
             extra_pytest_args: >-
-              --ignore=tests/core/agent/test_turn_scenarios.py
               --ignore=tests/cli/test_smoke.py
-            split_args: >-
-              --ci-splits=6 --ci-group=2
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=2
             pytest_paths: >-
               tests/cli
               tests/interactive_shell
               tests/surfaces
-              tests/agent
               tests/core/agent
               tests/fleet_monitoring
               tests/analytics
-              tests/tools/investigation
-              tests/delivery
               tests/sandbox
-              tests/hermes
           - os: ubuntu-latest
             shard: cli-runtime-3
             llm_provider: openai
             extra_pytest_args: >-
-              --ignore=tests/core/agent/test_turn_scenarios.py
               --ignore=tests/cli/test_smoke.py
-            split_args: >-
-              --ci-splits=6 --ci-group=3
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=3
             pytest_paths: >-
               tests/cli
               tests/interactive_shell
               tests/surfaces
-              tests/agent
               tests/core/agent
               tests/fleet_monitoring
               tests/analytics
-              tests/tools/investigation
-              tests/delivery
               tests/sandbox
-              tests/hermes
           - os: ubuntu-latest
             shard: cli-runtime-4
             llm_provider: openai
             extra_pytest_args: >-
-              --ignore=tests/core/agent/test_turn_scenarios.py
               --ignore=tests/cli/test_smoke.py
-            split_args: >-
-              --ci-splits=6 --ci-group=4
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=4
             pytest_paths: >-
               tests/cli
               tests/interactive_shell
               tests/surfaces
-              tests/agent
               tests/core/agent
               tests/fleet_monitoring
               tests/analytics
-              tests/tools/investigation
-              tests/delivery
               tests/sandbox
-              tests/hermes
           - os: ubuntu-latest
             shard: cli-runtime-5
             llm_provider: openai
             extra_pytest_args: >-
-              --ignore=tests/core/agent/test_turn_scenarios.py
               --ignore=tests/cli/test_smoke.py
-            split_args: >-
-              --ci-splits=6 --ci-group=5
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=5
             pytest_paths: >-
               tests/cli
               tests/interactive_shell
               tests/surfaces
-              tests/agent
               tests/core/agent
               tests/fleet_monitoring
               tests/analytics
-              tests/tools/investigation
-              tests/delivery
               tests/sandbox
-              tests/hermes
           - os: ubuntu-latest
             shard: cli-runtime-6
             llm_provider: openai
             extra_pytest_args: >-
-              --ignore=tests/core/agent/test_turn_scenarios.py
               --ignore=tests/cli/test_smoke.py
-            split_args: >-
-              --ci-splits=6 --ci-group=6
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=6
             pytest_paths: >-
               tests/cli
               tests/interactive_shell
               tests/surfaces
-              tests/agent
               tests/core/agent
               tests/fleet_monitoring
               tests/analytics
-              tests/tools/investigation
-              tests/delivery
               tests/sandbox
-              tests/hermes
           - os: ubuntu-latest
             shard: cli-live-agent
             # Keep all required live agent/tool-choice contracts on the
             # credentialed provider already used by this gate.
             llm_provider: openai
             pytest_paths: >-
-              tests/core/agent/test_turn_scenarios.py
               tests/tools/selection
           # This subprocess-heavy file dominated a whole duration-balanced
           # shard. Run complementary selections independently so its tests can
@@ -403,7 +340,6 @@ jobs:
             extra_pytest_args: >-
               -k 'test_opensre_landing_page_smoke or
               test_opensre_help_smoke or
-              test_investigate_print_template_new_relic_smoke or
               test_integrations_list_and_show_smoke or
               test_tests_inventory_commands_smoke or
               (test_onboard_interactive_smoke and not
@@ -415,21 +351,18 @@ jobs:
             extra_pytest_args: >-
               -k 'not (test_opensre_landing_page_smoke or
               test_opensre_help_smoke or
-              test_investigate_print_template_new_relic_smoke or
               test_integrations_list_and_show_smoke or
               test_tests_inventory_commands_smoke or
               (test_onboard_interactive_smoke and not
               test_onboard_interactive_smoke_cli_provider))'
           - os: ubuntu-latest
             shard: integrations-and-misc-1
-            split_args: >-
-              --ci-splits=6 --ci-group=1
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=1
             pytest_paths: >-
               tests/integrations
               tests/bootstrap
               tests/benchmarks
-              tests/chaos_engineering
               tests/shared
               tests/config
               tests/github_ci
@@ -439,14 +372,12 @@ jobs:
               gateway/tests
           - os: ubuntu-latest
             shard: integrations-and-misc-2
-            split_args: >-
-              --ci-splits=6 --ci-group=2
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=2
             pytest_paths: >-
               tests/integrations
               tests/bootstrap
               tests/benchmarks
-              tests/chaos_engineering
               tests/shared
               tests/config
               tests/github_ci
@@ -456,14 +387,12 @@ jobs:
               gateway/tests
           - os: ubuntu-latest
             shard: integrations-and-misc-3
-            split_args: >-
-              --ci-splits=6 --ci-group=3
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=3
             pytest_paths: >-
               tests/integrations
               tests/bootstrap
               tests/benchmarks
-              tests/chaos_engineering
               tests/shared
               tests/config
               tests/github_ci
@@ -473,14 +402,12 @@ jobs:
               gateway/tests
           - os: ubuntu-latest
             shard: integrations-and-misc-4
-            split_args: >-
-              --ci-splits=6 --ci-group=4
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=4
             pytest_paths: >-
               tests/integrations
               tests/bootstrap
               tests/benchmarks
-              tests/chaos_engineering
               tests/shared
               tests/config
               tests/github_ci
@@ -490,14 +417,12 @@ jobs:
               gateway/tests
           - os: ubuntu-latest
             shard: integrations-and-misc-5
-            split_args: >-
-              --ci-splits=6 --ci-group=5
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=5
             pytest_paths: >-
               tests/integrations
               tests/bootstrap
               tests/benchmarks
-              tests/chaos_engineering
               tests/shared
               tests/config
               tests/github_ci
@@ -507,14 +432,12 @@ jobs:
               gateway/tests
           - os: ubuntu-latest
             shard: integrations-and-misc-6
-            split_args: >-
-              --ci-splits=6 --ci-group=6
-              --ci-durations-path=.github/ci/pytest-file-durations.json
+            shard_args: >-
+              --splits=6 --group=6
             pytest_paths: >-
               tests/integrations
               tests/bootstrap
               tests/benchmarks
-              tests/chaos_engineering
               tests/shared
               tests/config
               tests/github_ci
@@ -528,20 +451,8 @@ jobs:
             pytest_paths: >-
               tests/e2e
             extra_pytest_args: >-
-              --ignore=tests/e2e/kubernetes
-              --ignore=tests/e2e/openclaw
-              --ignore=tests/e2e/upstream_lambda
-              --ignore=tests/e2e/upstream_prefect_ecs_fargate
-              --ignore=tests/e2e/upstream_apache_flink_ecs
               --ignore=tests/e2e/install
               --ignore=tests/e2e/quickstart
-          - os: ubuntu-latest
-            shard: e2e-provider-and-openclaw
-            pytest_paths: >-
-              tests/e2e/openclaw
-              tests/e2e/upstream_lambda
-              tests/e2e/upstream_apache_flink_ecs
-              tests/e2e/kubernetes
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -592,24 +503,46 @@ jobs:
       - name: Validate pytest marker
         if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
         env:
-          # Fork PRs do not receive repository secrets; skip live_llm contracts
-          # (see interactive-shell-live.yml). Index a JSON string array so the
+          # Fork PRs do not receive repository secrets; skip live_llm contracts.
+          # Index a JSON string array so the
           # value is always a marker string — never a bare boolean from
           # ``a && 'x' || 'y'`` (boolean false → ``-m false`` → xdist
-          # ``N workers [0 items]``, which can still exit 0).
-          PYTEST_MARKER_EXPR: ${{ fromJSON('["not synthetic", "not (synthetic or live_llm)"]')[github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true] }}
+          # ``N workers [0 items]``, which can still exit 0). An empty
+          # expression makes pytest skip mark filtering entirely (run all).
+          PYTEST_MARKER_EXPR: ${{ fromJSON('["", "not live_llm"]')[github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true] }}
         run: |
           echo "PYTEST_MARKER_EXPR=${PYTEST_MARKER_EXPR}"
           case "${PYTEST_MARKER_EXPR}" in
-            "not synthetic"|"not (synthetic or live_llm)") ;;
+            ""|"not live_llm") ;;
             *)
               echo "Refusing unexpected PYTEST_MARKER_EXPR: '${PYTEST_MARKER_EXPR}'" >&2
               exit 1
               ;;
           esac
 
+      - name: Pre-partition pytest files
+        id: shard
+        if: >-
+          (steps.changes.outputs.source == 'true' || github.event_name == 'push') &&
+          matrix.shard_args
+        run: >
+          uv run python -m tests.ci_sharding select
+          --output=.pytest-shard-files
+          ${{ matrix.shard_args }}
+          ${{ matrix.pytest_paths }}
+          ${{ matrix.extra_pytest_args }}
+          && echo "pytest_paths=$(tr '\n' ' ' < .pytest-shard-files)" >> "$GITHUB_OUTPUT"
+
       - name: Run tests
-        if: steps.changes.outputs.source == 'true' || github.event_name == 'push'
+        # The cli-live-agent shard needs OPENAI_API_KEY. Neither fork PRs nor
+        # Dependabot PRs can read repository secrets, so skip just that shard
+        # for them; every other shard and event runs unchanged.
+        if: >-
+          (steps.changes.outputs.source == 'true' || github.event_name == 'push') &&
+          !(github.event_name == 'pull_request' &&
+          matrix.shard == 'cli-live-agent' &&
+          (github.event.pull_request.head.repo.fork == true ||
+          github.event.pull_request.user.login == 'dependabot[bot]'))
         env:
           COVERAGE_FILE: .coverage.${{ matrix.shard }}
           # PRs do not consume coverage artifacts. Avoid instrumenting every
@@ -619,18 +552,16 @@ jobs:
             '--cov=config --cov=core --cov=infrastructure.deployment.ec2
             --cov=integrations --cov=infrastructure --cov=surfaces --cov=tools
             --cov=gateway --cov-report=' || '' }}
-          PYTEST_MARKER_EXPR: ${{ fromJSON('["not synthetic", "not (synthetic or live_llm)"]')[github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true] }}
+          PYTEST_MARKER_EXPR: ${{ fromJSON('["", "not live_llm"]')[github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true] }}
         # Keep ``run: >`` (folded) so ``matrix.pytest_paths`` stays one argv list.
         # A ``run: |`` + ``\`` rewrite can drop/split those paths and yield
         # ``N workers [0 items]`` even when the marker is correct.
         run: >
           uv run python -m pytest -p tests.ci_sharding -n auto -v
-          ${{ matrix.pytest_paths }}
+          ${{ steps.shard.outputs.pytest_paths || matrix.pytest_paths }}
           ${PYTEST_COVERAGE_ARGS}
-          --ignore=tests/e2e/kubernetes_local_alert_simulation
-          --ignore=tests/synthetic
           ${{ matrix.extra_pytest_args }}
-          ${{ matrix.split_args }}
+          --ci-durations-output=.pytest-file-durations-${{ matrix.shard }}.json
           -m "${PYTEST_MARKER_EXPR}"
 
       - name: Upload shard coverage data
@@ -643,6 +574,19 @@ jobs:
           name: coverage-data-${{ matrix.shard }}
           path: .coverage.${{ matrix.shard }}*
           if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Upload shard timing data
+        if: >-
+          always() &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-timings-${{ matrix.shard }}
+          path: .pytest-file-durations-${{ matrix.shard }}.json
+          if-no-files-found: warn
           include-hidden-files: true
           retention-days: 7
 
@@ -686,10 +630,23 @@ jobs:
           path: ./
           merge-multiple: true
 
+      - name: Download shard timing artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pytest-timings-*
+          path: .pytest-timings
+          merge-multiple: true
+
       - name: Combine coverage and build report
         run: |
           uv run python -m coverage combine .
           uv run python -m coverage html
+
+      - name: Merge pytest timing snapshot
+        run: >-
+          uv run python -m tests.ci_sharding merge
+          --output=.pytest-timings/pytest-file-durations.json
+          .pytest-timings/.pytest-file-durations-*.json
 
       - name: Upload combined coverage
         uses: actions/upload-artifact@v4
@@ -700,150 +657,12 @@ jobs:
             .coverage
           retention-days: 7
 
-  test-kubernetes:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 15
-
-    if: >-
-      github.repository == 'Tracer-Cloud/opensre' &&
-      (github.event_name == 'push' ||
-      (
-        github.event_name == 'pull_request' &&
-        (
-          contains(github.event.pull_request.title, 'k8s') ||
-          contains(github.event.pull_request.title, 'kubernetes')
-        )
-      ))
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+      - name: Upload reviewable pytest timing snapshot
+        uses: actions/upload-artifact@v4
         with:
-          version: "latest-known"  # avoid live ndjson "latest" fetch flakes
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-
-      - name: Install dependencies
-        run: uv sync --frozen --extra dev
-
-      - name: Run Kubernetes tests
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: uv run python -m tests.e2e.kubernetes.test_local
-
-  should-run-thorough:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'Tracer-Cloud/opensre'
-    outputs:
-      thorough: ${{ steps.filter.outputs.thorough }}
-    steps:
-      - uses: actions/checkout@v5
-      # Same pin as Detect relevant changes — see comment there.
-      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
-        id: filter
-        with:
-          filters: |
-            thorough:
-              - ".github/workflows/ci.yml"
-              - "pyproject.toml"
-              - "uv.lock"
-              - "integrations/**"
-              - "tools/investigation/**"
-              - "tools/**"
-              - "tests/e2e/cloudwatch_demo/**"
-              - "tests/e2e/upstream_lambda/**"
-              - "tests/e2e/upstream_apache_flink_ecs/**"
-
-  test-thorough:
-    runs-on: ubuntu-latest
-    needs: [test, should-run-thorough]
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      github.repository == 'Tracer-Cloud/opensre' &&
-      needs.should-run-thorough.outputs.thorough == 'true'
-    timeout-minutes: 30
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: cloudwatch-demo
-            command: python3 -m tests.e2e.cloudwatch_demo.test_aws
-          - name: upstream-lambda
-            command: python3 -m tests.e2e.upstream_lambda.test_agent_e2e
-          - name: flink-ecs
-            command: python3 -m tests.e2e.upstream_apache_flink_ecs.test_agent_e2e
-
-    name: test-thorough (${{ matrix.name }})
-
-    env:
-      # Thorough e2e suites make live LLM calls; run them on openai because the
-      # default anthropic account is credit-exhausted. Requires a valid, funded
-      # OPENAI_API_KEY secret.
-      LLM_PROVIDER: openai
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      JWT_TOKEN: ${{ secrets.JWT_TOKEN }}
-      TRACER_API_URL: ${{ secrets.TRACER_API_URL }}
-      TRACER_INGEST_TOKEN: ${{ secrets.TRACER_INGEST_TOKEN }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION: us-east-1
-      AWS_DEFAULT_REGION: us-east-1
-      GRAFANA_READ_TOKEN: ${{ secrets.GRAFANA_READ_TOKEN }}
-      GCLOUD_HOSTED_METRICS_ID: ${{ secrets.GCLOUD_HOSTED_METRICS_ID }}
-      GCLOUD_HOSTED_METRICS_URL: ${{ secrets.GCLOUD_HOSTED_METRICS_URL }}
-      GCLOUD_HOSTED_LOGS_ID: ${{ secrets.GCLOUD_HOSTED_LOGS_ID }}
-      GCLOUD_HOSTED_LOGS_URL: ${{ secrets.GCLOUD_HOSTED_LOGS_URL }}
-      GCLOUD_RW_API_KEY: ${{ secrets.GCLOUD_RW_API_KEY }}
-      CLOUDWATCH_VERIFY_LOGS: ${{ matrix.name == 'cloudwatch-demo' && '0' || '1' }}
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
-        with:
-          version: "latest-known"  # avoid live ndjson "latest" fetch flakes
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-
-      - name: Install dependencies
-        run: uv sync --frozen --extra dev
-
-      - name: Install tracer CLI
-        run: |
-          curl -sSL https://install.tracer.cloud | sh -s user_36fbN6K6FwEgJFHsQv1pUByo8K6
-
-      - name: Initialize tracer (optional)
-        run: |
-          sudo tracer init --token ${{ secrets.JWT_TOKEN }}
-        continue-on-error: true
-        timeout-minutes: 2
-
-      - name: Run test
-        run: uv run ${{ matrix.command }}
-        timeout-minutes: 30
+          name: pytest-file-durations-snapshot
+          path: .pytest-timings/pytest-file-durations.json
+          retention-days: 7
 
   session-store-locked:
     name: session-store-locked
@@ -903,9 +722,80 @@ jobs:
           -v
           --timeout=120
 
+  package-preflight:
+    name: package-preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Detect packaging changes
+        id: changes
+        uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        with:
+          filters: |
+            packaging:
+              - "README.md"
+              - "LICENSE"
+              - "MANIFEST.in"
+              - "pyproject.toml"
+              - "setup.cfg"
+              - "setup.py"
+              - "uv.lock"
+              - "bootstrap/**"
+              - "config/**"
+              - "core/**"
+              - "gateway/**"
+              - "infrastructure/**"
+              - "integrations/**"
+              - "surfaces/**"
+              - "tests/**"
+              - "tools/**"
+              - ".github/workflows/ci.yml"
+              - ".github/workflows/release.yml"
+              - "infrastructure/deployment/packaging/**"
+
+      - name: Install uv
+        if: steps.changes.outputs.packaging == 'true'
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "latest-known"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python
+        if: steps.changes.outputs.packaging == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Build and validate distributions
+        if: steps.changes.outputs.packaging == 'true'
+        run: |
+          uv sync --frozen --extra release-dist
+          uv run python -m build --outdir dist
+          uv run twine check dist/*
+          uv run python infrastructure/deployment/packaging/validate_wheel.py dist/*.whl
+
+      - name: Smoke the installed wheel
+        if: steps.changes.outputs.packaging == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_env="$(mktemp -d)"
+          uv venv --python 3.13 "$smoke_env"
+          uv pip install --python "$smoke_env/bin/python" dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$smoke_env/bin/opensre" --version
+          "$smoke_env/bin/opensre" _package-smoke
+
   ci-gate:
     name: CI Gate
-    needs: [quality-static, quality-typecheck, test, coverage-report, session-store-locked]
+    needs:
+      [quality-static, quality-typecheck, test, coverage-report, session-store-locked, package-preflight]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -921,8 +811,9 @@ jobs:
           test_result='${{ needs.test.result }}'
           coverage='${{ needs.coverage-report.result }}'
           session_locked='${{ needs.session-store-locked.result }}'
+          package_preflight='${{ needs.package-preflight.result }}'
           session_persistence_changed='${{ needs.session-store-locked.outputs.session_persistence }}'
-          echo "static=$static typecheck=$typecheck test=$test_result coverage-report=$coverage session-store-locked=$session_locked session_persistence=$session_persistence_changed"
+          echo "static=$static typecheck=$typecheck test=$test_result coverage-report=$coverage session-store-locked=$session_locked package-preflight=$package_preflight session_persistence=$session_persistence_changed"
 
           # Source jobs always start. On docs-only PRs their setup and test
           # steps skip after the per-job classifier, leaving a successful job.
@@ -939,6 +830,11 @@ jobs:
             success|skipped) ;;
             *) echo "::error::coverage-report is $coverage"; exit 1 ;;
           esac
+
+          [ "$package_preflight" = success ] || {
+            echo "::error::package-preflight is $package_preflight"
+            exit 1
+          }
 
           # session-store-locked is required for session/persistence/ changes,
           # and non-blocking elsewhere.

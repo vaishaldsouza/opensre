@@ -1,4 +1,4 @@
-"""The reusable tool-calling agent every surface runs (shell, gateway, investigation).
+"""The reusable tool-calling agent every surface runs (shell, gateway).
 
 You create an ``Agent`` with its config (LLM, system prompt, tools, iteration
 cap); ``run()`` gathers that config for one run and hands it to
@@ -156,6 +156,16 @@ class Agent[RuntimeToolT: RuntimeTool](EventEmitterMixin, ToolFilterMixin, Steer
         ``build_goal_reviewer`` carry ``verify`` and do gate.
         """
         if self._goal is None or self._goal.verify is None:
+            from infrastructure.observability.trace.decisions import record_decision
+
+            record_decision(
+                "conclusion",
+                attributes={
+                    "accepted": True,
+                    "reason": "no_goal_verifier",
+                    "iteration": iteration,
+                },
+            )
             return True, None
         from core.agent.goals import should_accept_with_goal
 

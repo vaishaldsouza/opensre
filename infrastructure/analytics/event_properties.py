@@ -3,42 +3,24 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
+from typing import Final
 
-from config.constants.investigation import MAX_INVESTIGATION_LOOPS
-from config.constants.llm import LLM_PROVIDER_ENV
-from config.llm_auth.provider_catalog import provider_spec
-from infrastructure.analytics.investigation_tracker_types import (
-    InvestigationTracker,
-    _with_investigation_loop_metrics,
+from config.constants.analytics import (
+    ANALYTICS_INSTALL_CHANNEL_ENV,
+    ANALYTICS_INSTALL_SOURCE_ENV,
+    ANALYTICS_INSTALL_VERSION_ENV,
 )
 from infrastructure.analytics.provider import Properties
 from infrastructure.analytics.repl_context import get_cli_session_id
+from infrastructure.safety.secret_redaction import redact_text
+
+_INSTALL_DIMENSION_MAX_CHARS: Final[int] = 80
 
 
 def _string_value(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
-
-
-def _configured_llm_model() -> str | None:
-    """Return the reasoning/legacy model env for the active LLM provider."""
-    provider = _string_value(os.getenv(LLM_PROVIDER_ENV))
-    candidates: list[str] = []
-    if provider is not None:
-        spec = provider_spec(provider)
-        if spec is not None:
-            candidates.extend(key for key in (spec.model_env, spec.legacy_model_env) if key)
-    if not candidates:
-        for fallback_provider in ("anthropic", "openai"):
-            spec = provider_spec(fallback_provider)
-            if spec is None:
-                continue
-            candidates.extend(key for key in (spec.model_env, spec.legacy_model_env) if key)
-    for key in candidates:
-        value = _string_value(os.getenv(key))
-        if value is not None:
-            return value
-    return None
 
 
 def _mapping_value(mapping: Mapping[str, object], key: str) -> str | None:
@@ -71,114 +53,6 @@ def _onboard_completed_properties(config: Mapping[str, object]) -> Properties:
     return properties
 
 
-def _investigation_started_properties(
-    *,
-    input_path: str | None,
-    input_json: str | None,
-    interactive: bool,
-    evaluate_requested: bool,
-    shared_properties: Properties,
-) -> Properties:
-    properties: Properties = {
-        **shared_properties,
-        "has_input_file": input_path is not None,
-        "has_inline_json": input_json is not None,
-        "interactive": interactive,
-        "evaluate_requested": evaluate_requested,
-    }
-    llm_provider = _string_value(os.getenv(LLM_PROVIDER_ENV))
-    llm_model = _configured_llm_model()
-    if llm_provider is not None:
-        properties["llm_provider"] = llm_provider
-    if llm_model is not None:
-        properties["llm_model"] = llm_model
-    return _with_investigation_loop_metrics(
-        properties,
-        loop_count=0,
-        iteration_cap=MAX_INVESTIGATION_LOOPS,
-    )
-
-
-def _investigation_completed_properties(
-    *,
-    shared_properties: Properties,
-    tracker: InvestigationTracker | None = None,
-    state: Mapping[str, object] | None = None,
-) -> Properties:
-    return _with_investigation_loop_metrics(
-        {**shared_properties},
-        state=state,
-        tracker=tracker,
-    )
-
-
-def _investigation_failed_properties(
-    *,
-    shared_properties: Properties,
-    failure_type: str | None = None,
-    failure_message: str | None = None,
-    failure_detail: str | None = None,
-    failure_category: str | None = None,
-    integration_involved: str | None = None,
-    integration_failure_message: str | None = None,
-    investigation_target: str | None = None,
-    state: Mapping[str, object] | None = None,
-    tracker: InvestigationTracker | None = None,
-) -> Properties:
-    properties: Properties = {**shared_properties}
-    if failure_type:
-        properties["failure_type"] = failure_type
-    if failure_message:
-        properties["failure_message"] = failure_message
-    if failure_detail:
-        properties["failure_detail"] = failure_detail
-    if failure_category:
-        properties["failure_category"] = failure_category
-    if integration_involved:
-        properties["integration_involved"] = integration_involved
-    if integration_failure_message:
-        properties["integration_failure_message"] = integration_failure_message
-    if investigation_target:
-        properties["investigation_target"] = investigation_target
-    return _with_investigation_loop_metrics(properties, state=state, tracker=tracker)
-
-
-def _investigation_outcome_properties(
-    *,
-    investigation_id: str,
-    status: str,
-    investigation_target: str,
-    root_cause_excerpt: str = "",
-    error_excerpt: str = "",
-    failure_category: str | None = None,
-    integration_involved: str | None = None,
-    integration_failure_message: str | None = None,
-    failure_detail: str | None = None,
-    state: Mapping[str, object] | None = None,
-) -> Properties:
-    properties: Properties = {
-        "investigation_id": investigation_id,
-        "status": status,
-        "investigation_target": investigation_target,
-    }
-    if root_cause_excerpt:
-        properties["root_cause_excerpt"] = root_cause_excerpt
-    if error_excerpt:
-        properties["error_excerpt"] = error_excerpt
-    if failure_category:
-        properties["failure_category"] = failure_category
-    if integration_involved:
-        properties["integration_involved"] = integration_involved
-    if integration_failure_message:
-        properties["integration_failure_message"] = integration_failure_message
-    if failure_detail:
-        properties["failure_detail"] = failure_detail
-    session_id = get_cli_session_id()
-    if session_id:
-        properties["cli_session_id"] = session_id
-    return _with_investigation_loop_metrics(properties, state=state)
-
-
 def _integration_lifecycle_properties(service: str) -> Properties:
     properties: Properties = {"service": service}
     session_id = get_cli_session_id()
@@ -209,6 +83,37 @@ def _bucket_percentage(percent: float) -> str:
     if percent < 95:
         return "75-94"
     return "95-100"
+
+
+def _bounded_redacted_text(value: object, *, max_chars: int) -> str:
+    text = redact_text(str(value)).strip()
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 1].rstrip()}…"
+
+
+def _optional_install_dimension(raw: str) -> str | None:
+    text = _bounded_redacted_text(raw, max_chars=_INSTALL_DIMENSION_MAX_CHARS)
+    return text or None
+
+
+def build_install_detected_properties(*, entrypoint: str) -> Properties:
+    """Build install dimensions supplied by an installer or inferred on first run."""
+    source = _optional_install_dimension(os.getenv(ANALYTICS_INSTALL_SOURCE_ENV, ""))
+    properties: Properties = {
+        "entrypoint": entrypoint,
+        "install_source": source or "first_cli_invocation",
+        "distribution": (
+            "frozen_binary"
+            if bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
+            else "python_package"
+        ),
+    }
+    if channel := _optional_install_dimension(os.getenv(ANALYTICS_INSTALL_CHANNEL_ENV, "")):
+        properties["install_channel"] = channel
+    if version := _optional_install_dimension(os.getenv(ANALYTICS_INSTALL_VERSION_ENV, "")):
+        properties["installed_version"] = version
+    return properties
 
 
 def build_cli_invoked_properties(

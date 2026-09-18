@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from core.domain.types.evidence import EvidenceSource
-from core.domain.types.tools import ToolSurface
+from core.domain.types.tools import ToolRole, ToolSurface
 from core.tool.contracts import BaseTool, RegisteredTool, _normalize_surfaces
 from core.tool_framework.tool_decorator import tool
 
@@ -98,9 +98,9 @@ class TestRequiresApprovalOnRegisteredTool:
         assert registered.requires_approval is False
         assert registered.approval_reason == ""
 
-    def test_from_base_tool_reads_parallel_safe_default(self) -> None:
+    def test_from_base_tool_reads_role_default(self) -> None:
         registered = RegisteredTool.from_base_tool(_ReadOnlyTool())
-        assert registered.parallel_safe is True
+        assert registered.role is ToolRole.ACTION
 
     def test_from_function_carries_requires_approval_metadata(self) -> None:
         registered = approval_function_tool.__opensre_registered_tool__  # type: ignore[attr-defined]
@@ -286,18 +286,18 @@ def test_from_function_explicit_description_overrides_docstring() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_normalize_surfaces_none_returns_investigation_default() -> None:
-    assert _normalize_surfaces(None) == (ToolSurface.INVESTIGATION,)
+def test_normalize_surfaces_none_returns_chat_default() -> None:
+    assert _normalize_surfaces(None) == (ToolSurface.CHAT,)
 
 
 def test_normalize_surfaces_valid_list() -> None:
-    result = _normalize_surfaces([ToolSurface.INVESTIGATION, ToolSurface.CHAT])
-    assert set(result) == {ToolSurface.INVESTIGATION, ToolSurface.CHAT}
+    result = _normalize_surfaces([ToolSurface.ACTION, ToolSurface.CHAT])
+    assert set(result) == {ToolSurface.ACTION, ToolSurface.CHAT}
 
 
 def test_normalize_surfaces_deduplicates() -> None:
-    result = _normalize_surfaces([ToolSurface.INVESTIGATION, ToolSurface.INVESTIGATION])
-    assert result == (ToolSurface.INVESTIGATION,)
+    result = _normalize_surfaces([ToolSurface.ACTION, ToolSurface.ACTION])
+    assert result == (ToolSurface.ACTION,)
 
 
 def test_normalize_surfaces_invalid_raises() -> None:
@@ -305,9 +305,9 @@ def test_normalize_surfaces_invalid_raises() -> None:
         _normalize_surfaces(["unknown_surface"])
 
 
-def test_normalize_surfaces_empty_list_returns_investigation_default() -> None:
+def test_normalize_surfaces_empty_list_returns_chat_default() -> None:
     result = _normalize_surfaces([])
-    assert result == (ToolSurface.INVESTIGATION,)
+    assert result == (ToolSurface.CHAT,)
 
 
 class _TaggedBaseTool(BaseTool):
@@ -315,9 +315,9 @@ class _TaggedBaseTool(BaseTool):
     description = "Base tool with registry metadata."
     input_schema: dict[str, Any] = {"type": "object", "properties": {}}
     source: EvidenceSource = "grafana"
-    surfaces = (ToolSurface.INVESTIGATION, ToolSurface.CHAT)
+    surfaces = (ToolSurface.ACTION,)
     tags = ("logs", "observability")
-    parallel_safe = False
+    role = ToolRole.BOOKKEEPING
 
     def run(self) -> dict[str, Any]:
         return {}
@@ -325,14 +325,14 @@ class _TaggedBaseTool(BaseTool):
 
 def test_from_base_tool_uses_class_registry_metadata() -> None:
     registered = RegisteredTool.from_base_tool(_TaggedBaseTool())
-    assert registered.surfaces == ("investigation", "chat")
+    assert registered.surfaces == ("action",)
     assert registered.tags == ("logs", "observability")
-    assert registered.parallel_safe is False
+    assert registered.role is ToolRole.BOOKKEEPING
 
 
 def test_from_base_tool_explicit_surfaces_override_class_metadata() -> None:
-    registered = RegisteredTool.from_base_tool(_TaggedBaseTool(), surfaces=("action",))
-    assert registered.surfaces == ("action",)
+    registered = RegisteredTool.from_base_tool(_TaggedBaseTool(), surfaces=("chat",))
+    assert registered.surfaces == ("chat",)
     assert registered.tags == ("logs", "observability")
 
 
@@ -359,7 +359,7 @@ def test_from_function_approval_expiry_zero_is_preserved() -> None:
 
 def test_from_function_approval_expiry_none_uses_default() -> None:
     """approval_expiry_seconds=None must fall back to DEFAULT_APPROVAL_EXPIRY_SECONDS."""
-    from config.constants.investigation import DEFAULT_APPROVAL_EXPIRY_SECONDS
+    from config.constants.tooling import DEFAULT_APPROVAL_EXPIRY_SECONDS
 
     def fn() -> None:
         pass

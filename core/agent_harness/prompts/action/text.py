@@ -2,7 +2,7 @@
 
 The stable base lives in ``opensre_system_prompt.md`` (loaded at import time)
 so the long planner prompt is editable as data and packaged with the wheel.
-That file is the OpenSRE action-planner contract (handoff vs investigation,
+That file is the OpenSRE action-planner contract (handoff vs direct answer,
 compound turns, slash mapping) — not a coding-agent / Codex clone.
 """
 
@@ -19,7 +19,7 @@ from ..system_prompt import (
 )
 
 # When the planner should offer scheduling, given CONTEXT setup_state.
-# Skill bodies (e.g. morning_report) own the procedural steps.
+# Skill bodies (e.g. delivering-morning-briefings) own the procedural steps.
 # The same text is inlined in opensre_system_prompt.md; tests require this
 # constant to remain a substring of the loaded base.
 ACTION_SETUP_CAPACITY_SCHEDULE_RULE = (

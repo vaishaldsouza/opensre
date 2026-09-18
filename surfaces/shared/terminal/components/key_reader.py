@@ -1,7 +1,7 @@
 """Low-level terminal key reader for TTY-first interactive menus.
 
 Shared between :mod:`choice_menu` (REPL inline picker) and
-:mod:`feedback` (post-investigation rating prompt) so the raw-mode
+:mod:`feedback` (post-run rating prompt) so the raw-mode
 terminal I/O lives in one place.
 
 Return values from :func:`read_key_unix` / :func:`read_key_windows`:
@@ -41,13 +41,29 @@ def flush_pending_input() -> None:
             msvcrt.getwch()  # type: ignore[attr-defined]
 
 
-def restore_stdin_terminal() -> None:
-    """Return stdin to canonical echo mode after Live/raw investigation UI.
+def _raw_input_mode(fd: int) -> None:
+    """Raw keystrokes with output left cooked: a line feed still returns the carriage.
 
-    Investigation progress uses a background Tab watcher that puts stdin in
+    ``tty.setraw`` also clears OPOST. A termios snapshot taken while a key read
+    is in flight restores that later, and everything painted after it walks
+    across the screen one column further per line.
+    """
+    import termios
+    import tty
+
+    tty.setraw(fd)  # type: ignore[attr-defined]
+    attrs = termios.tcgetattr(fd)  # type: ignore[attr-defined]
+    attrs[1] |= termios.OPOST  # type: ignore[attr-defined]
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)  # type: ignore[attr-defined]
+
+
+def restore_stdin_terminal() -> None:
+    """Return stdin to canonical echo mode after Live/raw progress UI.
+
+    Progress rendering uses a background Tab watcher that puts stdin in
     non-canonical mode without echo. If nested watchers restore the wrong
     snapshot, the shell prompt appears to accept input but characters are not
-    echoed. Call this after investigation UI teardown and before line prompts.
+    echoed. Call this after progress UI teardown and before line prompts.
     """
     if os.name == "nt" or not sys.stdin.isatty():
         return
@@ -94,12 +110,11 @@ def read_key_unix(
     """
     import select as _sel
     import termios
-    import tty
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)  # type: ignore[attr-defined]
     try:
-        tty.setraw(fd)  # type: ignore[attr-defined]
+        _raw_input_mode(fd)
         ch = os.read(fd, 1)
         if not ch:
             return "eof"
@@ -230,12 +245,11 @@ def read_menu_or_char(*, allow_chars: bool = False, alpha_keys: bool = False) ->
 def _read_menu_or_char_unix(*, allow_chars: bool, alpha_keys: bool = False) -> str:
     import select as _sel
     import termios
-    import tty
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)  # type: ignore[attr-defined]
     try:
-        tty.setraw(fd)  # type: ignore[attr-defined]
+        _raw_input_mode(fd)
         ch = os.read(fd, 1)
         if not ch:
             return "eof"
@@ -347,12 +361,11 @@ def _read_menu_or_char_windows(*, allow_chars: bool, alpha_keys: bool = False) -
 def _read_typing_key_unix() -> str:
     import select as _sel
     import termios
-    import tty
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)  # type: ignore[attr-defined]
     try:
-        tty.setraw(fd)  # type: ignore[attr-defined]
+        _raw_input_mode(fd)
         ch = os.read(fd, 1)
         if not ch:
             return "eof"

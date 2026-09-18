@@ -84,6 +84,37 @@ def test_resolve_restores_context_and_reopens_storage() -> None:
     assert reopened == ["sess-1"]
 
 
+def test_resolve_restores_dangling_tool_recovery_note() -> None:
+    repo = SimpleNamespace(
+        load_session=lambda session_id: {
+            "session_id": session_id,
+            "dangling_tool_intents": [
+                {
+                    "tool_call_id": "call-1",
+                    "tool": "shell_run",
+                    "arguments": {"command": "deploy", "args": ["api"]},
+                    "user_text": "Deploy the API",
+                }
+            ],
+        }
+    )
+
+    session = SessionManager(store=InMemorySessionStore(), repo=repo).resolve("sess-1")
+
+    assert session.pending_recovery_note is not None
+    assert "shell_run deploy api" in session.pending_recovery_note
+    assert "never blindly repeat" in session.pending_recovery_note
+
+
+def test_restore_context_clears_a_recovery_note_once_intents_are_committed() -> None:
+    session = Session(session_id="sess-1")
+    session.pending_recovery_note = "stale recovery note"
+
+    _manager().restore_context(session, {"dangling_tool_intents": []})
+
+    assert session.pending_recovery_note is None
+
+
 def test_restore_context_ignores_empty_and_malformed() -> None:
     manager = _manager()
     session = Session(session_id="s")
@@ -182,13 +213,11 @@ def test_close_persists_and_releases_resources() -> None:
 
     session = Session(session_id="s-close")
     session.store = storage
-    session.terminal.background_notices.append("pending notice")
     session.terminal.prompt_refresh_fn = lambda: None
 
     manager.close(session)
 
     assert flushed == ["s-close"]
-    assert session.terminal.background_notices == []
     assert session.terminal.prompt_refresh_fn is None
 
 
@@ -344,7 +373,6 @@ def test_closed_session_is_garbage_collectable() -> None:
     session = Session(session_id="s-gc")
     session.store = InMemorySessionStore()
     session.terminal.prompt_refresh_fn = lambda: None
-    session.terminal.background_notices.append("x")
     ref = weakref.ref(session)
 
     manager.close(session)

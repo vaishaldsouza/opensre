@@ -17,14 +17,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.agent_harness.spi.handoff import AskUserQuestion
+from core.agent_harness.spi.handoff import AskUserQuestion, parse_ask_user_answers, question_key
 from core.agent_harness.spi.session_state import (
     PendingUserChoice,
     session_terminal,
     set_auto_command,
 )
 from core.agent_harness.tools import ActionToolScope, execute_with_action_context
-from core.domain.types.tools import ToolSurface
+from core.domain.types.tools import ToolRole, ToolSurface
 from core.tool import RegisteredTool, SideEffectLevel
 from core.tool_framework.utils import object_schema, string_array_property, string_property
 from infrastructure.safety.terminal_output import strip_terminal_controls
@@ -38,7 +38,8 @@ _CHOOSE_COMMAND = "/choose"
 _DEFAULT_HEADER = "Ask User"
 
 _FALLBACK_INSTRUCTION = (
-    "No interactive selection menu is available on this surface. If the choice "
+    "No interactive selection menu is available on this surface. Follow the "
+    "active skill's unavailable-menu instructions first. Otherwise, if the choice "
     "is required for work to continue, present a short numbered list and ask "
     "the user to reply. If this was only an optional follow-up, do NOT park a "
     "numbered question — finish with one sentence of instructions."
@@ -46,9 +47,9 @@ _FALLBACK_INSTRUCTION = (
 _QUEUED_INSTRUCTION = (
     "The selection menu opens after this turn ends. End the turn now without a "
     "user-facing sentence; do NOT repeat the options as text or ask the user to "
-    "type a number. The user's selection arrives as the next user message (the "
-    "chosen option label, verbatim). After selection, continue the original work "
-    "and do not merely repeat or acknowledge the chosen label."
+    "type a number. The user's selection arrives as the next user message as the "
+    "question followed by the chosen option label, verbatim. After selection, "
+    "continue the original work and do not merely repeat or acknowledge the label."
 )
 _QUEUED_BATCH_INSTRUCTION = (
     "The Ask User menu opens after this turn ends. Before it, say in one or two "
@@ -57,6 +58,10 @@ _QUEUED_BATCH_INSTRUCTION = (
     'and constraints"). Do NOT repeat the questions themselves as text and do '
     "NOT call update_plan yet. The user's answers arrive as the next user "
     "message. After they arrive, call update_plan then execute."
+)
+_DEFERRED_INSTRUCTION = (
+    "The host will render this required choice after the turn and persist it for "
+    "a later invocation. End the turn now without repeating the question or options."
 )
 
 _QUESTION_ITEM_SCHEMA = {
@@ -102,6 +107,11 @@ def _menu_available(ctx: ActionToolScope) -> bool:
         return False
     ports = ctx.slash_ports
     return ports is not None and bool(ports.tty_interactive())
+
+
+def _deferred_choice_available(ctx: ActionToolScope) -> bool:
+    capabilities = getattr(ctx.session, "available_capabilities", {})
+    return "deferred" in capabilities.get("ask_user_choice", ())
 
 
 def _parse_options(raw: object) -> list[str]:
@@ -150,6 +160,7 @@ def _parse_questions(raw: object) -> tuple[list[AskUserQuestion] | None, str | N
     if not raw:
         return [], None
     parsed: list[AskUserQuestion] = []
+    seen_titles: set[str] = set()
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             return None, f"questions[{index}] must be an object"
@@ -160,6 +171,12 @@ def _parse_questions(raw: object) -> tuple[list[AskUserQuestion] | None, str | N
             return None, f"questions[{index}].label is required"
         if not title:
             return None, f"questions[{index}].title is required"
+        title_key = question_key(title)
+        if title_key in seen_titles:
+            return None, (
+                f"questions[{index}].title is already used; each question needs its own title"
+            )
+        seen_titles.add(title_key)
         option_error = _options_error(options)
         if option_error is not None:
             return None, f"questions[{index}]: {option_error}"
@@ -177,6 +194,32 @@ def _parse_questions(raw: object) -> tuple[list[AskUserQuestion] | None, str | N
     return parsed, None
 
 
+def _answered_this_turn(ctx: ActionToolScope, title: str) -> str | None:
+    """The answer the user gave to ``title`` in this turn's message, if any."""
+    wanted = question_key(title)
+    if not wanted:
+        return None
+    for asked, answer in parse_ask_user_answers(getattr(ctx, "turn_user_message", "") or ""):
+        if question_key(asked) == wanted:
+            return answer
+    return None
+
+
+def _answered_earlier(ctx: ActionToolScope, title: str) -> bool:
+    """True when this session already settled ``title`` in an earlier turn."""
+    wanted = question_key(title)
+    settled = getattr(ctx.session, "questions_already_answered", None) or set()
+    return bool(wanted) and wanted in settled
+
+
+def _already_answered_error(answered: dict[str, str]) -> str:
+    listed = "; ".join(f"{asked!r}: {answer!r}" for asked, answer in answered.items())
+    return (
+        f"The user already answered in this message: {listed}. "
+        "Use the answers and continue with the next step; do not ask again."
+    )
+
+
 def execute_ask_user_choice_tool(args: dict[str, Any], ctx: ActionToolScope) -> dict[str, Any]:
     questions, questions_error = _parse_questions(args.get("questions"))
     if questions_error is not None:
@@ -184,6 +227,31 @@ def execute_ask_user_choice_tool(args: dict[str, Any], ctx: ActionToolScope) -> 
 
     title = strip_terminal_controls(str(args.get("title", ""))).strip()
     options = _parse_options(args.get("options"))
+    multi_select = _parse_bool(args.get("multi_select"), default=False)
+
+    if questions:
+        # Answered questions leave the batch; the rest are still asked.
+        answered = {q.title: a for q in questions if (a := _answered_this_turn(ctx, q.title))}
+        settled = [q.title for q in questions if _answered_earlier(ctx, q.title)]
+        answered.update(dict.fromkeys(settled, "answered earlier in this session"))
+        questions = [q for q in questions if q.title not in answered]
+        if not questions:
+            return {"ok": False, "error": _already_answered_error(answered)}
+        if answered and len(questions) == 1:
+            # One question left after the drop: ask it as a single decision.
+            only = questions[0]
+            title, options, multi_select = only.title, list(only.options), only.multi_select
+            questions = None
+    elif (answer := _answered_this_turn(ctx, title)) is not None:
+        return {"ok": False, "error": _already_answered_error({title: answer})}
+    elif _answered_earlier(ctx, title):
+        return {
+            "ok": False,
+            "error": (
+                f"The user already answered {title!r} earlier in this session. "
+                "Continue from that answer; do not ask it again."
+            ),
+        }
 
     if questions:
         if getattr(ctx.session, "ask_user_rounds", 0) >= _MAX_ASK_ROUNDS:
@@ -219,21 +287,35 @@ def execute_ask_user_choice_tool(args: dict[str, Any], ctx: ActionToolScope) -> 
         option_error = _options_error(options)
         if option_error is not None:
             return {"ok": False, "error": option_error}
-        multi_select = _parse_bool(args.get("multi_select"), default=False)
         pending = PendingUserChoice(
             title=title,
             options=tuple(options),
             multi_select=multi_select,
+            note=strip_terminal_controls(str(args.get("note", ""))).strip(),
+            custom_answer=_parse_bool(args.get("allow_custom"), default=True),
         )
         queued = _QUEUED_INSTRUCTION
         summary = f"selection menu queued: {title}"
 
-    if not _menu_available(ctx):
+    menu_available = _menu_available(ctx)
+    deferred = _deferred_choice_available(ctx)
+    if not menu_available and not deferred:
         return {"ok": True, "menu": "unavailable", "instruction": _FALLBACK_INSTRUCTION}
 
     ctx.session.pending_user_choice = pending
+    skill = getattr(ctx.session, "active_skill", None)
+    by_skill = getattr(ctx.session, "skill_question_keys", None)
+    if skill and isinstance(by_skill, dict):
+        by_skill.setdefault(skill, set()).update(question_key(q.title) for q in pending.items())
     if questions:
         ctx.session.ask_user_rounds = getattr(ctx.session, "ask_user_rounds", 0) + 1
+    if deferred and not menu_available:
+        return {
+            "ok": True,
+            "menu": "deferred",
+            "summary": summary,
+            "instruction": _DEFERRED_INSTRUCTION,
+        }
     set_auto_command(ctx.session, _CHOOSE_COMMAND)
     terminal = session_terminal(ctx.session)
     if terminal is not None:
@@ -252,12 +334,16 @@ def run_ask_user_choice(
     options: list[str] | None = None,
     questions: list[dict[str, Any]] | None = None,
     multi_select: bool = False,
+    note: str = "",
+    allow_custom: bool = True,
     context: Any,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "title": title,
         "options": options or [],
         "multi_select": multi_select,
+        "note": note,
+        "allow_custom": allow_custom,
     }
     if questions is not None:
         payload["questions"] = questions
@@ -280,7 +366,8 @@ ask_user_choice_tool = RegisteredTool(
         "user what you are about to ask and that they can type their own "
         "answer if none fit. The menu opens after the turn ends; answers "
         "arrive verbatim as the next user message. If the result says the "
-        "menu is unavailable, fall back to a numbered list."
+        "menu is unavailable, follow the active skill's recovery instructions; "
+        "otherwise fall back to a numbered list."
     ),
     use_cases=[
         (
@@ -294,8 +381,7 @@ ask_user_choice_tool = RegisteredTool(
         ),
         (
             "Triage is blocked on several facts the user must supply (where a "
-            "service lives, how to get metrics, the time window) and there is "
-            "no investigate/RCA verb with a concrete alert payload yet — one "
+            "service lives, how to get metrics, the time window) — one "
             "questions payload, then plan"
         ),
         "A skill instructs presenting a structured choice / dropdown to the user",
@@ -307,10 +393,6 @@ ask_user_choice_tool = RegisteredTool(
         "Optional end-of-turn follow-up on a headless, scheduled, gateway, or /goal turn",
         "One ask_user_choice call per question when several facts block the same job",
         "Calling update_plan before the Ask User answers arrive",
-        (
-            "Explicit investigate/RCA/diagnose with pasted alert JSON or quoted "
-            "payload — call investigation_start instead of Ask User"
-        ),
     ],
     input_schema=object_schema(
         properties={
@@ -326,6 +408,9 @@ ask_user_choice_tool = RegisteredTool(
                     "Two to eight short option labels for a single decision, "
                     "recommended option first. Omit when questions is set."
                 ),
+            ),
+            "note": string_property(
+                description="Optional short explainer shown inside a single-question menu.",
             ),
             "questions": {
                 "type": "array",
@@ -344,12 +429,20 @@ ask_user_choice_tool = RegisteredTool(
                     "Ignored when questions is set (use per-question multi_select)."
                 ),
             },
+            "allow_custom": {
+                "type": "boolean",
+                "description": (
+                    "For a single title/options decision: when false, the menu has "
+                    "no free-text row and the user must pick one of the options. "
+                    "Default true."
+                ),
+            },
         },
         required=(),
     ),
     source="interactive_shell",
     surfaces=(ToolSurface.ACTION,),
-    parallel_safe=False,
+    role=ToolRole.TURN_ENDING,
     accepts_runtime_context=True,
     run=run_ask_user_choice,
     tags=("safe", "fast", "no-credentials"),

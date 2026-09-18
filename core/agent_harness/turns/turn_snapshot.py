@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from core.agent_harness.prompts.kernel.surfaces import profile_for
+from core.agent_harness.session_goal.goal import SessionGoal
+from core.agent_harness.session_goal.progress import format_session_goal_brief
 from core.state import MAX_CONVERSATION_MESSAGES
 from core.state.transcript_window import compact_messages_to_window
 from infrastructure.setup_state import cached_setup_state
@@ -61,8 +63,6 @@ class TurnSnapshotSource(Protocol):
 
     cli_agent_messages: list[tuple[str, str]]
     configured_integrations_known: bool
-    last_state: dict[str, Any] | None
-    last_synthetic_observation_path: str | None
     reasoning_effort: ReasoningEffortChoice | None
 
     # Read-only here; ``Session`` stores a tuple. A property matches
@@ -116,13 +116,16 @@ def _select_runtime_request_input(text: str, source: Any) -> Any | None:
 
 
 def _interactive_choice_available(session: Any, surface: str | None) -> bool:
-    """True when this turn can open the Ask User / ``/choose`` picker.
+    """True when this turn can accept an Ask User choice.
 
-    Gateway and headless sessions have no terminal facet. An interactive-shell
-    session with a terminal facet can queue the menu (the tool still checks TTY).
+    The interactive shell queues its picker. A headless CLI host instead
+    persists the choice for a later invocation. Gateway cannot do either.
     """
     if surface == "gateway":
         return False
+    if surface == "headless_cli":
+        capabilities = getattr(session, "available_capabilities", {})
+        return "deferred" in capabilities.get("ask_user_choice", ())
     if surface not in (None, "interactive_shell"):
         return False
     return getattr(session, "terminal", None) is not None
@@ -154,12 +157,6 @@ class TurnSnapshot:
     configured_integrations_known: bool
     """Whether ``configured_integrations`` reflects real state (vs unknown)."""
 
-    last_state: dict[str, Any] | None
-    """Final ``AgentState`` from the most recent investigation (follow-up grounding)."""
-
-    last_synthetic_observation_path: str | None
-    """Path to latest synthetic-run observation file (failure explanation context)."""
-
     reasoning_effort: ReasoningEffortChoice | None
     """Session-scoped reasoning effort preference for LLM calls this turn."""
 
@@ -176,6 +173,12 @@ class TurnSnapshot:
 
     active_tools: tuple[RuntimeTool, ...] = ()
     """Subset of tools offered to the model for this turn."""
+
+    skill_discovery_enabled: bool = True
+    """Whether the host allows workflow discovery for this turn."""
+
+    active_skill: str | None = None
+    """Skill whose question this turn answers, independent of transcript retention."""
 
     resolved_integrations: dict[str, Any] = field(default_factory=dict)
     """Resolved integration configuration passed to tool execution."""
@@ -212,6 +215,9 @@ class TurnSnapshot:
 
     session_goal_attached: bool = False
     """True when a ``/goal`` (SessionGoal) is attached for this turn."""
+
+    session_goal_brief: str = ""
+    """Condition, checklist and last verdict of the attached ``/goal``, for the prompt."""
 
     interactive_choice_available: bool = False
     """True when ``ask_user_choice`` can open a keyboard menu on this surface."""
@@ -260,12 +266,12 @@ class TurnSnapshot:
             configured_integrations=tuple(session.configured_integrations),
             configured_integrations_known=bool(session.configured_integrations_known),
             setup_state=_setup_state_for_surface(session.configured_integrations, surface),
-            last_state=session.last_state,
-            last_synthetic_observation_path=session.last_synthetic_observation_path,
             reasoning_effort=session.reasoning_effort,
             system_prompt=getattr(runtime_input, "system_prompt", ""),
             available_tools=tuple(getattr(runtime_input, "available_tools", ())),
             active_tools=tuple(getattr(runtime_input, "active_tools", ())),
+            skill_discovery_enabled=bool(getattr(session, "skill_discovery_enabled", True)),
+            active_skill=getattr(session, "active_skill", None),
             resolved_integrations=dict(getattr(runtime_input, "resolved_integrations", {}) or {}),
             tool_resources=dict(getattr(runtime_input, "tool_resources", {}) or {}),
             max_iterations=int(getattr(runtime_input, "max_iterations", 1)),
@@ -276,6 +282,7 @@ class TurnSnapshot:
             plan_only_until_authorized=bool(getattr(session, "plan_only_until_authorized", False)),
             prompt_surface=surface,
             session_goal_attached=getattr(session, "session_goal", None) is not None,
+            session_goal_brief=_session_goal_brief(session),
             interactive_choice_available=_interactive_choice_available(session, surface),
             active_vcs_repositories=dict(getattr(session, "active_vcs_repositories", {}) or {}),
             known_vcs_repositories={
@@ -317,6 +324,13 @@ def _pop_recovery_note(session: TurnSnapshotSource) -> str | None:
         return None
     setattr(session, "pending_recovery_note", None)  # noqa: B010 - protocol lacks the optional field
     return note
+
+
+def _session_goal_brief(session: Any) -> str:
+    goal = getattr(session, "session_goal", None)
+    if not isinstance(goal, SessionGoal):
+        return ""
+    return format_session_goal_brief(goal)
 
 
 def _read_task_plan(session: TurnSnapshotSource) -> TaskPlan | None:

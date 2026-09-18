@@ -193,7 +193,7 @@ Want credentials only from the environment, never on disk? Set
 | --- | --- | --- |
 | `OPENSRE_REASONING_EFFORT` |  | Effort for extended-thinking models: `low`, `medium`, `high`, or `xhigh` |
 
-## CLI investigation tools
+## CLI providers
 
 <AccordionGroup>
   <Accordion title="Codex">
@@ -349,15 +349,16 @@ Want credentials only from the environment, never on disk? Set `OPENSRE_DISABLE_
 | Variable | Default | Description |
 | --- | --- | --- |
 | `OPENSRE_DISABLE_KEYRING` | `0` | Disable local credential storage; credentials must come from the environment |
+| `OPENSRE_ACCOUNT_TOKEN` |  | Personal OpenSRE account token; with `OPENSRE_DISABLE_KEYRING=1`, also set `OPENSRE_APP_URL` |
+| `OPENSRE_APP_URL` | `https://app.opensre.com` | OpenSRE app origin; set it explicitly with an environment-only account token |
 | `OPENSRE_LLM_AUTH_METADATA_PATH` | `~/.opensre/llm-auth.json` | Non-secret LLM auth metadata path used by prompt-safe status checks |
-| `OPENSRE_API_KEY` |  | API key for remote OpenSRE instances |
 
 ## Telemetry & Monitoring
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `OPENSRE_NO_TELEMETRY` | `0` | Disable all telemetry, including Sentry and PostHog (covers `$ai_generation` prompt/response events) |
-| `OPENSRE_ANALYTICS_DISABLED` | `0` | Disable PostHog analytics only |
+| `OPENSRE_NO_TELEMETRY` | `0` | Disable all telemetry, including Sentry and product analytics (covers `$ai_generation` prompt/response events) |
+| `OPENSRE_ANALYTICS_DISABLED` | `0` | Disable product analytics only |
 | `OPENSRE_SENTRY_DISABLED` | `0` | Disable Sentry error reporting |
 | `OPENSRE_SENTRY_DSN` |  | Override Sentry DSN |
 | `OPENSRE_SENTRY_LOGGING_DISABLED` | `0` | Disable Sentry log integration |
@@ -373,11 +374,50 @@ Want credentials only from the environment, never on disk? Set `OPENSRE_DISABLE_
 | `SENTRY_TRACES_SAMPLE_RATE` | `1.0` | Trace sampling rate for Sentry |
 | `SENTRY_ERROR_SAMPLE_RATE` | `1.0` | Error sampling rate for Sentry |
 
+### LLM tracing with Langfuse (optional)
+
+Every chat turn can be exported as a [Langfuse](https://langfuse.com) trace:
+one trace per turn, with the user message and the reply on the root, a
+`generation` per model call (model, prompt, response, token usage) and a
+`tool` per tool execution nested under the agent loop.
+
+Traces are grouped and attributed the way you work:
+
+- **Session**: the Langfuse `session_id` is the OpenSRE session id (the
+  `~/.opensre/sessions/<id>.jsonl` file). Everything run from a shell session
+  joins it — including the scheduled loops that shell is hosting, which are
+  tagged `scheduled` with the task id and name in metadata. Loops run by the
+  background scheduler service or the gateway group per task instead.
+- **User**: the chat-platform user for gateway turns; the signed-in OpenSRE
+  account for the shell and CLI; a stable per-install id when signed out.
+  Shell and CLI traces also carry that `installation_id` in metadata so traces
+  from before a login can be matched to the user afterwards.
+
+Tracing is off unless **both** keys are set and the extra is installed:
+
+```bash
+uv sync --extra langfuse          # or: pip install 'opensre[langfuse]'
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+```
+
+Without the keys — or without the package — the agent runs exactly as before;
+nothing is buffered or exported. Credential-shaped values (API keys, bearer
+tokens, `password`/`token` fields) are masked before a span leaves the process.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `LANGFUSE_PUBLIC_KEY` |  | Langfuse project public key (required to enable tracing) |
+| `LANGFUSE_SECRET_KEY` |  | Langfuse project secret key (required to enable tracing) |
+| `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Langfuse host; use `https://us.cloud.langfuse.com` for the US region or your self-hosted URL (`LANGFUSE_HOST` is accepted as a legacy alias) |
+| `LANGFUSE_SAMPLE_RATE` | `1.0` | Fraction of traces to export (read by the Langfuse SDK) |
+| `LANGFUSE_DEBUG` | `False` | Verbose Langfuse SDK logging (read by the Langfuse SDK) |
+| `OPENSRE_LANGFUSE_DISABLED` | `0` | Keep tracing off even when keys are present, e.g. on a machine that shares a `.env` with `langfuse-cli` |
+
 ## Paths & Directories
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `INVESTIGATIONS_DIR` | `~/.opensre/investigations` | Directory for saved investigations |
 | `OPENSRE_HOME` | `~/.opensre` | Root directory for local OpenSRE state |
 | `OPENSRE_PROJECT_ENV_PATH` | `PROJECT_ROOT/.env` | Path to project-level `.env` file |
 | `OPENSRE_WIZARD_STORE_PATH` | `~/.opensre/opensre.json` | Path to the local wizard/provider selection store |
@@ -428,7 +468,6 @@ Mirror conversation history and memory to a user-owned object store. Details: [R
 | `HELM_KUBE_CONTEXT` |  | kubectl context for Helm |
 | `HELM_KUBECONFIG` |  | kubeconfig path for Helm |
 | `HELM_NAMESPACE` |  | Default Helm namespace |
-| `GITLAB_MR_WRITEBACK` |  | Enable GitLab merge request writeback (`true`, `1`, `yes`) |
 | `OPENSRE_RELEASES_API_URL` | GitHub releases API | Override releases API endpoint |
 
 ## Integration credentials
@@ -440,8 +479,6 @@ Mirror conversation history and memory to a user-owned object store. Details: [R
 | --- | --- | --- |
 | `GRAFANA_INSTANCE_URL` |  | Grafana instance URL |
 | `GRAFANA_READ_TOKEN` |  | Grafana API token |
-| `GRAFANA_WRITE_TOKEN` |  | Grafana token for writing annotations (log sink) |
-| `GRAFANA_LOKI_PUSH_URL` |  | Loki push URL for the Grafana investigation log sink |
 | `GRAFANA_LOKI_DATASOURCE_UID` |  | UID of Loki datasource in Grafana |
 | `GRAFANA_TEMPO_DATASOURCE_UID` |  | UID of Tempo datasource in Grafana |
 | `GRAFANA_MIMIR_DATASOURCE_UID` |  | UID of Mimir datasource in Grafana |
@@ -597,8 +634,6 @@ Mirror conversation history and memory to a user-owned object store. Details: [R
 | `GITLAB_BASE_URL` |  | GitLab instance URL |
 | `GITLAB_ACCESS_TOKEN` |  | GitLab personal access token |
 | `GITLAB_PROJECT_ID` |  | GitLab project ID |
-| `GITLAB_REPO_URL` |  | GitLab repository URL |
-| `GITLAB_MR_IID` |  | Merge request IID for writeback context |
 | `JIRA_BASE_URL` |  | Jira instance URL |
 | `JIRA_EMAIL` |  | Jira user email |
 | `JIRA_API_TOKEN` |  | Jira API token |
@@ -618,7 +653,6 @@ Mirror conversation history and memory to a user-owned object store. Details: [R
 | `OPSGENIE_REGION` | `us` | Opsgenie region (us/eu) |
 | `VERCEL_API_TOKEN` |  | Vercel API token |
 | `VERCEL_TEAM_ID` |  | Vercel team ID |
-| `VERCEL_POLL_PROJECT_IDS` |  | Project IDs for Vercel polling (CSV) |
 | `VERCEL_RUNTIME_LOGS_READ_TIMEOUT` | `600` | Seconds to wait per Vercel runtime-log read (minimum `30`) |
 | `GOOGLE_CREDENTIALS_FILE` |  | Path to Google service-account JSON for Docs export |
 | `GOOGLE_DRIVE_FOLDER_ID` |  | Google Drive folder for Docs export |
@@ -717,8 +751,6 @@ Mirror conversation history and memory to a user-owned object store. Details: [R
 | `OPENOBSERVE_MAX_RESULTS` | `100` | Max OpenObserve results |
 | `VICTORIA_LOGS_URL` |  | VictoriaLogs instance URL |
 | `VICTORIA_LOGS_TENANT_ID` |  | VictoriaLogs tenant ID |
-| `HERMES_LOG_PATH` | `~/.hermes/logs/errors.log` | Hermes log path saved by `opensre integrations setup hermes`; also defines the path sandbox for `get_hermes_logs` |
-| `OPENSRE_HERMES_INVESTIGATE` |  | Set to `1` to enable Hermes watch auto-investigation when the CLI flag is omitted |
 | `CLICKHOUSE_HOST` |  | ClickHouse host |
 | `CLICKHOUSE_PORT` | `8123` | ClickHouse port |
 | `CLICKHOUSE_DATABASE` | `default` | ClickHouse database |
@@ -756,11 +788,6 @@ Mirror conversation history and memory to a user-owned object store. Details: [R
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `OPENCLAW_MCP_URL` |  | OpenClaw MCP server URL |
-| `OPENCLAW_MCP_COMMAND` |  | OpenClaw MCP command to execute |
-| `OPENCLAW_MCP_MODE` | `streamable-http` | OpenClaw MCP transport mode |
-| `OPENCLAW_MCP_ARGS` |  | OpenClaw MCP command arguments |
-| `OPENCLAW_MCP_AUTH_TOKEN` |  | OpenClaw MCP auth token |
 | `POSTHOG_MCP_MODE` | `streamable-http` | PostHog MCP transport mode |
 | `POSTHOG_MCP_URL` | `https://mcp.posthog.com/mcp` | PostHog MCP URL |
 | `POSTHOG_MCP_AUTH_TOKEN` |  | PostHog MCP auth token |

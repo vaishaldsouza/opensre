@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from surfaces.shared.terminal.tables.tool_catalog import ToolCatalogEntry
 
 # MCP-type services are also rendered under `/mcp list` for focused MCP actions.
-MCP_INTEGRATION_SERVICES = frozenset({"github", "openclaw"})
+MCP_INTEGRATION_SERVICES = frozenset({"github"})
 
 
 def status_style(status: str) -> str:
@@ -174,7 +174,11 @@ def render_mcp_table(console: Console, results: list[dict[str, str]]) -> None:
     render_table(console, "MCP servers", _INTEGRATION_COLS, [_integration_row(r) for r in rows])
 
 
-def render_models_table(console: Console, settings: Any) -> None:
+def render_models_table(
+    console: Console,
+    settings: Any,
+    source: str = "local configuration",
+) -> None:
     if settings is None:
         repl_print(console, f"[{ERROR}]LLM settings unavailable[/] — check provider env vars.")
         return
@@ -182,7 +186,7 @@ def render_models_table(console: Console, settings: Any) -> None:
     reasoning_model, toolcall_model = resolve_provider_models(settings, provider)
     render_table(
         console,
-        "LLM connection",
+        f"LLM connection · {source}",
         _MODEL_COLS,
         [(provider, reasoning_model, toolcall_model)],
     )
@@ -210,6 +214,10 @@ def render_tools_table(console: Console, entries: list[ToolCatalogEntry]) -> Non
 
 
 _COMMAND_OUTPUT_INDENT = "    "  # aligns wrapped lines under the ``  ↳ `` marker
+# Cells :func:`print_command_output` prepends to every replayed line. A piped
+# child must render ``console.width - COMMAND_OUTPUT_GUTTER_WIDTH`` wide, or its
+# box-drawing rows fold when re-printed here (borders have no break points).
+COMMAND_OUTPUT_GUTTER_WIDTH = len(_COMMAND_OUTPUT_INDENT)
 
 _TRACEBACK_HEADER = "Traceback (most recent call last):"
 _TRACEBACK_FRAME_RE = re.compile(r'^\s*File "(?P<file>.+)", line (?P<line>\d+), in (?P<fn>.+)$')
@@ -269,6 +277,7 @@ def print_command_output(
 
 
 __all__ = [
+    "COMMAND_OUTPUT_GUTTER_WIDTH",
     "ColumnDef",
     "MCP_INTEGRATION_SERVICES",
     "print_command_output",

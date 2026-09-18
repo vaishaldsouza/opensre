@@ -177,7 +177,7 @@ def test_anthropic_rate_limit_error_is_retried_then_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Rate-limit is transient by design — retry with backoff like 500s do.
-    Without retry, a single 429 mid-investigation kills the whole case.
+    Without retry, a single 429 mid-turn kills the whole turn.
     """
     from core.llm.shared.openai_chat_completions import _RETRY_MAX_ATTEMPTS
 
@@ -289,6 +289,8 @@ def test_anthropic_invoke_marks_system_and_last_tool_for_prompt_cache(
     assert api_tools[1]["cache_control"] == {"type": "ephemeral"}
     # Caller-owned tool dicts must not be mutated.
     assert "cache_control" not in tools[1]
+    # One action per response: the model is asked for a single tool call.
+    assert captured["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
 
 
 def test_openai_agent_client_invoke_strips_internal_message_markers(
@@ -403,6 +405,42 @@ def test_openai_insufficient_quota_raises_LLMCreditExhaustedError(
 
     # Fail fast — exactly one attempt, no retry waste.
     assert call_count == 1
+
+
+def test_opensre_payment_required_raises_upgrade_error_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hosted proxy returns HTTP 402 as a generic SDK status error."""
+    from core.llm.shared.llm_retry import OpenSRECreditsExhaustedError
+
+    _install_fake_openai(monkeypatch)
+    call_count = 0
+    upgrade_url = "https://app.opensre.dev/usage"
+
+    class HostedPaymentRequired(Exception):
+        code = "opensre_credits_exhausted"
+        body = {
+            "code": "opensre_credits_exhausted",
+            "upgrade_url": "https://app.opensre.dev/usage",
+        }
+
+    def raise_payment_required(**_: object) -> object:
+        nonlocal call_count
+        call_count += 1
+        raise HostedPaymentRequired("Payment required")
+
+    client = OpenAIAgentClient.__new__(OpenAIAgentClient)
+    client._client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=raise_payment_required))
+    )
+    client._model = "gpt-4o"
+    client._max_tokens = 512
+
+    with pytest.raises(OpenSRECreditsExhaustedError) as excinfo:
+        client.invoke(messages=[{"role": "user", "content": "hi"}])
+
+    assert call_count == 1
+    assert excinfo.value.upgrade_url == upgrade_url
 
 
 def test_anthropic_rate_limit_honors_retry_after_header(
@@ -623,7 +661,7 @@ def test_openai_agent_client_invoke_raw_content_preserves_extra_fields(
     assert first_tc.get("thought_signature") == "abc123"
 
 
-def test_openai_agent_client_enables_parallel_tool_calls_for_openai(
+def test_openai_agent_client_disables_parallel_tool_calls_for_openai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_openai(monkeypatch)
@@ -647,7 +685,7 @@ def test_openai_agent_client_enables_parallel_tool_calls_for_openai(
     )
 
     assert captured["tool_choice"] == "auto"
-    assert captured["parallel_tool_calls"] is True
+    assert captured["parallel_tool_calls"] is False
 
 
 def test_openai_gpt_5_6_agent_uses_responses_api_and_replays_reasoning(
@@ -729,6 +767,7 @@ def test_openai_gpt_5_6_agent_uses_responses_api_and_replays_reasoning(
     assert first.tool_calls[0].input == {"service": "api"}
     assert second.content == "done"
     assert captured[0]["max_output_tokens"] == 4096
+    assert captured[0]["parallel_tool_calls"] is False
     assert captured[0]["reasoning"] == {"effort": "high"}
     assert captured[0]["tools"] == [
         {
@@ -853,7 +892,7 @@ def test_openai_rate_limit_error_is_retried_then_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Rate-limit is transient by design — retry with backoff like 500s do.
-    Without retry, a single 429 mid-investigation kills the whole case (matters
+    Without retry, a single 429 mid-turn kills the whole turn (matters
     especially on tight OpenAI tiers like gpt-4o's 30k TPM).
     """
     from core.llm.shared.openai_chat_completions import _RETRY_MAX_ATTEMPTS
@@ -1078,9 +1117,6 @@ def test_build_openai_tool_specs_preserves_additional_properties_false() -> None
 
 def test_build_openai_tool_specs_normalizes_anyof_optional_parameters() -> None:
     from core.llm.shared.tool_schema_normalize import build_openai_tool_specs
-    from tests.core.runtime.llm.investigation_tool_schema_contract import (
-        assert_strict_tool_schema_node,
-    )
 
     tool = types.SimpleNamespace(
         name="optional_field_tool",
@@ -1098,9 +1134,8 @@ def test_build_openai_tool_specs_normalizes_anyof_optional_parameters() -> None:
     specs = build_openai_tool_specs([tool])
     parameters = specs[0]["function"]["parameters"]
     assert parameters["type"] == "object"
-    assert "anyOf" not in parameters["properties"]["optional_field"]
-    assert parameters["properties"]["optional_field"]["type"] == "string"
-    assert_strict_tool_schema_node(parameters, path="optional_field_tool")
+    optional_field = parameters["properties"]["optional_field"]
+    assert optional_field == {"type": "string"}, "anyOf/nullable must be flattened away"
 
 
 def test_get_llm_agent_routes_deepseek_to_openai_compatible_client(
@@ -1319,7 +1354,6 @@ def test_cli_backed_agent_client_accepts_plain_text_as_final_answer() -> None:
 
 
 def test_cli_backed_agent_client_parses_tool_json() -> None:
-
     from core.llm.transports.sdk.agent_clients import CLIBackedAgentClient
 
     class _FakeCLI:
@@ -1777,7 +1811,7 @@ def test_anthropic_unexpected_response_shape_raises_runtime_error(
 
 def test_anthropic_agent_client_emits_provider_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     """Successful agent invokes must report provider token usage via the usage hook
-    so investigation-turn telemetry can carry real token counts (issue #3698)."""
+    so agent-turn telemetry can carry real token counts (issue #3698)."""
     from core.llm.shared.usage import set_usage_hook
 
     _install_fake_anthropic(monkeypatch)

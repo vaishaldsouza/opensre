@@ -21,6 +21,7 @@ from config.version import get_opensre_version
 from core.agent_harness.session.persistence.contracts import CHAT_KINDS, SessionPersistenceSource
 from core.agent_harness.session.persistence.paths import session_path
 from infrastructure.observability.operations_log import record_operation
+from infrastructure.observability.trace.decisions import record_decision
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,6 @@ def _session_file_lock_enabled() -> bool:
     }
 
 
-_TRIGGER_MAX_CHARS = 200
 # Cold tip scan keeps at most this many trailing bytes resident (then grows by the
 # same step only while the window still contains nothing but skippable rows).
 _TAIL_SCAN_CHUNK_BYTES = 64 * 1024
@@ -219,7 +219,7 @@ class JsonlSessionStore:
         metadata: dict[str, Any] | None = None,
         parent_id: str | None = None,
     ) -> str:
-        return self._append_entry(
+        entry_id = self._append_entry(
             session_id,
             "message",
             {
@@ -229,6 +229,13 @@ class JsonlSessionStore:
             },
             parent_id=parent_id,
         )
+        if entry_id and role == "assistant":
+            record_decision(
+                "assistant_persisted",
+                attributes={"message_id": entry_id, "text": content},
+                session_id=session_id,
+            )
+        return entry_id
 
     def append_tool_call(
         self,
@@ -391,31 +398,6 @@ class JsonlSessionStore:
             resolve_parent=False,
         )
 
-    def append_investigation_result(
-        self,
-        session_id: str,
-        state: dict[str, Any],
-        *,
-        trigger: str = "",
-    ) -> str:
-        investigation_id = uuid.uuid4().hex[:8]
-        report = state.get("problem_md") or state.get("slack_message") or state.get("report") or ""
-        self._append_entry(
-            session_id,
-            "investigation_result",
-            {
-                "investigation_id": investigation_id,
-                "completed_at": _now(),
-                "trigger": trigger.strip()[:_TRIGGER_MAX_CHARS],
-                "root_cause": str(state.get("root_cause") or ""),
-                "report": str(report),
-                "root_cause_category": str(state.get("root_cause_category") or ""),
-                "alert_name": str(state.get("alert_name") or ""),
-                "run_id": str(state.get("run_id") or ""),
-            },
-        )
-        return investigation_id
-
     def flush(self, session: SessionPersistenceSource) -> None:
         with contextlib.suppress(Exception):
             path = session_path(session.session_id)
@@ -436,8 +418,11 @@ class JsonlSessionStore:
             return
         trailing_leaf = records[-1].get("type") == "leaf"
         if not trailing_leaf and not self._has_turns(records):
-            path.unlink(missing_ok=True)
-            return
+            from core.agent_harness.session.pending_choice import PendingUserChoice
+
+            if not isinstance(getattr(session, "pending_user_choice", None), PendingUserChoice):
+                path.unlink(missing_ok=True)
+                return
         # Trailing ``leaf``: still append changed session-goal state so
         # mid-session ``/goal pause`` survives the next ``resolve``. Do not
         # write another leaf (end-of-session flush stays idempotent).
@@ -483,6 +468,21 @@ class JsonlSessionStore:
                     content=plan_state or {},
                     display=False,
                 )
+        if hasattr(session, "pending_user_choice"):
+            from core.agent_harness.session.pending_choice import (
+                PENDING_USER_CHOICE_STATE_CUSTOM_TYPE,
+                pending_user_choice_state_snapshot,
+                should_persist_pending_user_choice_state,
+            )
+
+            choice_state = pending_user_choice_state_snapshot(session)
+            if should_persist_pending_user_choice_state(choice_state, prior_records=records):
+                self.append_custom_message(
+                    session.session_id,
+                    custom_type=PENDING_USER_CHOICE_STATE_CUSTOM_TYPE,
+                    content=choice_state or {},
+                    display=False,
+                )
         if trailing_leaf:
             return
         if session.agent.messages and not any(rec.get("type") == "message" for rec in records):
@@ -508,7 +508,6 @@ class JsonlSessionStore:
                 "duration_secs": duration_secs,
                 "total_turns": self._count_turns(records),
                 "chat_turns": self._count_chat_turns(records),
-                "investigation_turns": self._count_investigation_turns(records),
                 "ended_at": _now(),
             },
         )
@@ -722,7 +721,7 @@ class JsonlSessionStore:
     @staticmethod
     def _has_turns(records: list[dict[str, Any]]) -> bool:
         return any(
-            rec.get("type") in {"message", "investigation_result"}
+            rec.get("type") == "message"
             or (rec.get("type") == "custom_message" and rec.get("custom_type") == "turn_stub")
             for rec in records
         )
@@ -743,14 +742,4 @@ class JsonlSessionStore:
             if rec.get("type") == "custom_message"
             and rec.get("custom_type") == "turn_stub"
             and rec.get("kind") in CHAT_KINDS
-        )
-
-    @staticmethod
-    def _count_investigation_turns(records: list[dict[str, Any]]) -> int:
-        return sum(
-            1
-            for rec in records
-            if rec.get("type") == "custom_message"
-            and rec.get("custom_type") == "turn_stub"
-            and rec.get("kind") in {"alert", "incoming_alert"}
         )

@@ -24,8 +24,8 @@ When you type `/` and browse with the arrow keys, the hint line above the prompt
 | Input type | What happens |
 | --- | --- |
 | Slash command (`/status`) | Routed through the action agent and executed via `slash_invoke` |
-| Plain language (`verify datadog`) | Routed by the action agent to slash commands, investigations, or doc-grounded answers |
-| Pasted alert JSON/text | Often starts an investigation without a slash command |
+| Plain language (`verify datadog`) | Routed by the action agent to slash commands, tool calls, or doc-grounded answers |
+| Pasted alert JSON/text | The agent triages it in chat, calling integration tools as needed |
 | Shell one-liner (`kubectl get pods`) | Executed through shell policy when the action agent selects a shell action |
 
 **TTY vs non-TTY:** Interactive menus, confirmations, and onboarding wizards need a real terminal. Piping input or running in CI is non-interactive — prefer explicit CLI commands outside the REPL for automation.
@@ -41,7 +41,18 @@ When you type `/` and browse with the arrow keys, the hint line above the prompt
 | **Ctrl+C** twice within 2s | Exit the REPL (prints `/resume` hint) |
 | **Ctrl+D** | Exit when the prompt is empty (same resume hint as `/exit`) |
 
-When you first launch the shell with no scheduled loops, a picker offers three starter loops (CI/CD, task management, daily brief). Escape skips; the picker returns on the next launch until a loop exists. See [Scheduled deliveries](/cron).
+Every launch starts guided onboarding and asks which demo to run. The four
+choices cover repository analysis, recurring CI/CD checks, the upcoming managed
+service, and Slack setup. Escape skips onboarding; "Or type your own answer..."
+lets you submit a different request. Type `/demo` to start again.
+See [CI/CD analytics demo](/cicd-analytics-demo).
+
+The banner and prompt show **CI/CD fixes**: distinct GitHub repairs whose pushed
+checks passed, including merge-conflict repairs. A repair can count before it is
+merged; check the target branch before assuming it is green. Fixes in this shell
+update the prompt immediately. Use `/clear` to pick up fixes saved by another
+OpenSRE process in the same deployment. Zero also covers an unavailable count;
+the total is best-effort and can decrease after restarting if a save failed.
 
 ## Quick reference
 
@@ -73,15 +84,6 @@ When you first launch the shell with no scheduled loops, a picker offers three s
 | `/new` | Start a new session file while keeping LLM context |
 | `/goal` | Set a finish line and keep working toward it across turns — see [Goals](/goals) |
 
-### Investigation
-
-| Command | What it does |
-| --- | --- |
-| `/investigate` | Run an RCA from a file path or sample template |
-| `/template` | Print a starter alert JSON template |
-| `/last` | Reprint the most recent investigation report |
-| `/save <path>` | Export the last investigation to a file **elevated** |
-
 ### Integrations, models, and tools
 
 | Command | What it does |
@@ -90,8 +92,8 @@ When you first launch the shell with no scheduled loops, a picker offers three s
 | `/verify` | Verify integration connectivity (all or one service) |
 | `/integrations` | List, verify, show, setup, or remove integrations |
 | `/mcp` | List, connect, or disconnect MCP servers |
-| `/model` | Show or switch LLM provider and models |
-| `/tools` | List registered investigation and chat tools |
+| `/model` | Show the account-managed hosted model |
+| `/tools` | List registered chat and action tools |
 
 ### Privacy and history
 
@@ -104,21 +106,12 @@ When you first launch the shell with no scheduled loops, a picker offers three s
 
 | Command | What it does |
 | --- | --- |
-| `/background` | Run investigations async; track RCAs and completion notifications |
 | `/loops` | List, create, run once, and debug recurring prompt loops |
 | `/tasks` | List recent and in-flight background tasks |
 | `/work` | List, add, complete, and prioritize human work items |
 | `/cancel <id>` | Cancel a running task by id **elevated** |
-| `/stop` | Guidance for stopping investigations and background work |
-
-### Watchdog
-
-| Command | What it does |
-| --- | --- |
-| `/watch` | Watch a process and send threshold alarms via Telegram or Rocket.Chat **elevated** |
-| `/watches` | List active watchdog tasks with latest samples |
-| `/unwatch <id>` | Stop a watchdog task by id **elevated** |
-| `/watchdog` | CLI-parity wrapper for the watchdog monitor |
+| `/stop` | Guidance for stopping background work |
+| `/gateway` | Start, stop, or inspect the background gateway daemon |
 
 ### Agents and alerts
 
@@ -126,6 +119,7 @@ When you first launch the shell with no scheduled loops, a picker offers three s
 | --- | --- |
 | `/fleet` | View and manage the local AI agent fleet |
 | `/alerts` | Alert listener inbox status |
+| `/choose` | Reopen the selection menu the agent is waiting on |
 
 ### CLI parity
 
@@ -133,7 +127,7 @@ These commands delegate to the same Click CLI you would run outside the REPL.
 
 | Command | What it does |
 | --- | --- |
-| `/account` | Sign in to OpenSRE with GitHub, inspect the local account, or sign out |
+| `/account` | Sign in to OpenSRE, inspect the local account, or sign out |
 | `/auth` | Log in to LLM providers, show provider auth status, or clear credentials |
 | `/login` | Shortcut for `/auth login` (`/login openai`, `/login anthropic`, `/login deepseek`) |
 | `/onboard` | Interactive onboarding wizard |
@@ -143,10 +137,10 @@ These commands delegate to the same Click CLI you would run outside the REPL.
 | `/cron` | Manage scheduled delivery jobs |
 | `/sentry` | Schedule automated Sentry morning digests or uptime watches (Telegram or Slack required) |
 | `/messaging` | Telegram pairing and allowlist |
-| `/hermes` | Hermes log tailing and incident escalation |
 | `/guardrails` | Sensitive-information guardrail rules |
-| `/tests` | Browse and run inventoried tests |
 | `/update` | Check for updates and upgrade OpenSRE |
+| `/posthog` | Run or schedule PostHog per-metric summary reports |
+| `/runbooks` | Manage trusted runbook sources for guided investigations |
 | `/debug` | Targeted runtime diagnostics |
 | `/uninstall` | Remove OpenSRE and local data **elevated** |
 
@@ -156,6 +150,7 @@ These commands delegate to the same Click CLI you would run outside the REPL.
 | --- | --- |
 | `/doctor` | Full local environment diagnostic |
 | `/version` | OpenSRE, Python, and OS versions |
+| `/theme` | Choose and persist the shell colour theme |
 
 ### Commands with interactive menus (TTY)
 
@@ -167,11 +162,14 @@ Bare invocation opens a picker or submenu:
 | `/integrations` | list / verify / show / setup / remove |
 | `/mcp` | list / connect / disconnect |
 | `/model` | show / set / restore / toolcall |
-| `/investigate` | Demo alerts, templates, custom file path |
-| `/template` | Template type picker |
+| `/theme` | Pick a colour theme from the installed list |
+| `/choose` | Reopen the selection menu the agent queued |
 | `/trust`, `/verbose` | on / off |
 | `/history` | show / clear / off / on / retention |
 | `/resume` | Numbered list of recent sessions |
+
+`/model` keeps its menu running: picking `show` prints the current models and
+hands you back to the menu, so leave it with **done** or Esc.
 
 ## Commands
 
@@ -183,7 +181,6 @@ Bare invocation opens a picker or submenu:
 ```text
 /help
 /help /model
-/help investigation
 /help tasks
 /help all
 ```
@@ -191,13 +188,13 @@ Bare invocation opens a picker or submenu:
 | Form | Result |
 | --- | --- |
 | `/help` | Interactive picker in a TTY; category index otherwise |
-| `/help &lt;command&gt;` | Detailed usage for one command (e.g. `/help /watch`) |
-| `/help &lt;category&gt;` | All commands in a section (`investigation`, `session`, `tasks`, …) |
+| `/help &lt;command&gt;` | Detailed usage for one command (e.g. `/help /model`) |
+| `/help &lt;category&gt;` | All commands in a section (`session`, `tasks`, …) |
 | `/help all` | Full command index |
 
-Help categories mirror the REPL grouping: Quick Access, Session, Integrations/Models/Tools, Investigation, Privacy, Tasks, Agents, Alerts, CLI parity, and System.
+Help categories mirror the REPL grouping: Quick Access, Session, Integrations/Models/Tools, Privacy, Tasks, Agents, Alerts, CLI parity, and System.
 
-**Quick Access** duplicates frequently used commands (`/investigate`, `/integrations`, `/model`, `/health`, `/watch`, `/status`, `/help`) for faster discovery in the picker.
+**Quick Access** duplicates frequently used commands (`/integrations`, `/model`, `/health`, `/status`, `/help`) for faster discovery in the picker.
 
 </Accordion>
 
@@ -225,12 +222,11 @@ Typical fields:
 | --- | --- |
 | `interactions` | Count of recorded turns (chat, slash, alerts) |
 | `incoming alerts` | Alerts received by the local listener this session, plus age of the latest |
-| `last investigation` | `yes` if `/investigate` or a streamed investigation completed |
 | `trust mode` | `on` / `off` |
 | `reasoning effort` | Current `/effort` level (OpenAI/Codex only) |
 | `provider` | Active `LLM_PROVIDER` |
 | `grounding … cache` | Doc/source cache stats used for help answers |
-| `accumulated context` | Comma-separated keys from prior investigations (e.g. `service`, `cluster`) |
+| `accumulated context` | Comma-separated keys from prior turns (e.g. `service`, `cluster`) |
 
 Use `/status` for **session** state. Use `/health` for **integration connectivity**.
 
@@ -278,13 +274,13 @@ Token totals reset on `/new` or when session identity is rotated. They do **not*
 
 <Accordion title="/context">
 
-Displays key/value infra metadata collected during investigations and chat — typically `service`, `cluster`, `region`, or similar fields extracted from alert text and investigation state.
+Displays key/value infra metadata collected during chat — typically `service`, `cluster`, `region`, or similar fields extracted from alert text and tool results.
 
 ```text
 /context
 ```
 
-Context is **inherited** across investigations in the same session (and restored by `/resume`). It is passed as overrides to subsequent `/investigate` runs so the pipeline does not re-ask for environment details you already established.
+Context is **inherited** across turns in the same session (and restored by `/resume`), so the agent does not re-ask for environment details you already established.
 
 </Accordion>
 
@@ -301,7 +297,7 @@ Set reasoning depth for **OpenAI and Codex** providers in this REPL session only
 | --- | --- |
 | `low` | Fast triage, simple lookups, lower token cost |
 | `medium` | Default balance for most incident work |
-| `high` | Deeper RCA when latency is acceptable |
+| `high` | Deeper analysis when latency is acceptable |
 | `xhigh`, `max` | Maximum reasoning; best with newer GPT-5 or Codex models — older models may reject these levels |
 
 Bare `/effort` prints the current level, the config default for your provider/model, and supported choices. `/status` includes the same field.
@@ -324,7 +320,7 @@ Set how often the REPL asks before running agent tools. Shown on the status line
 | --- | --- |
 | `high` (default) | Nothing — alpha default; every tool runs immediately |
 | `med` | Mutating agent tools: shell, code agent, slash/CLI, synthetic tests, LLM provider switch, Sentry issue fix, … |
-| `low` | Everything `med` asks about, plus starting an investigation (including sample-alert) |
+| `low` | Everything `med` asks about, plus additional tool starts |
 | `off` | Every tool type |
 
 `/auto` is **not** a shell-command allowlist: under alpha, shell strings still run when approved (or when High skips the prompt). Lower levels only promote the existing `ask` confirmation hook by `tool_type`.
@@ -337,7 +333,7 @@ Session preference only — not restored by `/resume`. Bare `/auto` prints the c
 
 <Accordion title="/trust">
 
-Trust mode skips execution confirmation prompts for **elevated** commands (`/save`, `/watch`, `/cancel`, `/uninstall`, integration remove, etc.).
+Trust mode skips execution confirmation prompts for **elevated** commands (`/cancel`, `/uninstall`, integration remove, etc.).
 
 ```text
 /trust on
@@ -347,15 +343,11 @@ Trust mode skips execution confirmation prompts for **elevated** commands (`/sav
 
 In a TTY, bare `/trust` opens an interactive on/off menu. Trust mode is a **session preference** — it is not restored by `/resume`.
 
-<Tip>
-  During watchdog demos or repeated `/save` exports, `/trust on` avoids confirmation fatigue. Turn it off before running destructive commands you might mistype.
-</Tip>
-
 </Accordion>
 
 <Accordion title="/verbose">
 
-Toggle `TRACER_VERBOSE` logging for the REPL process (deeper internal logs to stderr).
+Toggle `TRACER_VERBOSE` logging for the REPL process (deeper internal logs to stderr). Also shows the per-turn tool-call log above each reply; by default it is hidden and only reachable with `Ctrl+O`.
 
 ```text
 /verbose on
@@ -398,10 +390,10 @@ List up to **20** recent sessions stored on disk, newest first:
 ```text
   Recent sessions
 
-   #  Session ID  Name                           Started            Duration  Turns  Investigations
-   ─────────────────────────────────────────────────────────────────────────────────────────────
-   1  3f8a1c2d    (current)                      Jun 17 10:00       42m       8      2
-   2  9b2e4f7a    why is CPU spiking on prod-api Jun 16 14:30       1h 5m    15     4
+   #  Session ID  Name                           Started            Duration  Turns
+   ───────────────────────────────────────────────────────────────────────────────
+   1  3f8a1c2d    (current)                      Jun 17 10:00       42m       8
+   2  9b2e4f7a    why is CPU spiking on prod-api Jun 16 14:30       1h 5m    15
 ```
 
 | Column | Meaning |
@@ -409,7 +401,6 @@ List up to **20** recent sessions stored on disk, newest first:
 | `Session ID` | First 8 characters of the UUID (enough for `/resume`) |
 | `Name` | Derived from the first user message or resumed session label |
 | `Turns` | Total chat + slash + alert turns recorded |
-| `Investigations` | Count of investigation turns |
 
 The current row updates **duration** live. Sessions with no name show `(current)` or `↩ &lt;resumed-from&gt;` when applicable.
 
@@ -504,108 +495,6 @@ See [Goals](/goals) for the full workflow.
 
 </AccordionGroup>
 
-### Investigation
-Three ways to start RCA from the REPL:
-
-| Method | Example | Best for |
-| --- | --- | --- |
-| Plain language | `checkout returns 502 on prod` | Quick starts, pasted context |
-| Slash + file/template | `/investigate alert.json` | Repeatable runs, CI fixtures |
-| Slash + interactive picker | `/investigate` → choose template | Demos, first-time users |
-
-Investigations inherit [accumulated context](#context) from earlier runs in the same session.
-
-<AccordionGroup>
-<Accordion title="/investigate">
-
-```text
-/investigate alert.json
-/investigate generic
-/investigate sample:datadog
-/investigate ./alerts/checkout-502.json
-/investigate
-```
-
-| Target | Behavior |
-| --- | --- |
-| `alert.json` | Bundled demo alert file shipped with OpenSRE |
-| `generic`, `datadog`, `grafana`, `honeycomb`, `coralogix`, `splunk` | Built-in sample templates (runs immediately) |
-| `sample:&lt;name&gt;` or `template:&lt;name&gt;` | Explicit template prefix |
-| File path | Read alert text from disk (`.json`, `.md`, `.txt`) |
-| Bare `/investigate` | Interactive picker in a TTY |
-
-<Tip>
-  Template names win over same-named files in the working directory. Force file mode: `/investigate ./generic`
-</Tip>
-
-**During a run:**
-
-- Output streams to the terminal like chat
-- **Ctrl+C** cancels and marks the task cancelled
-- `/tasks` shows the investigation task id and status
-- On completion, `last_state` is updated for `/last` and `/save`
-- Infra fields from the result merge into accumulated context
-
-**Errors:** Missing files, unreadable paths, and pipeline failures print actionable messages; failed runs do not update `last_state`.
-
-</Accordion>
-
-<Accordion title="/template">
-
-Print starter alert JSON to stdout — copy, edit, save, then `/investigate your-file.json`.
-
-```text
-/template generic
-/template datadog
-/template
-```
-
-| Template | Typical use |
-| --- | --- |
-| `generic` | Minimal portable alert shape |
-| `datadog` | Datadog monitor-style payload |
-| `grafana` | Grafana alerting format |
-| `honeycomb` | Honeycomb trigger shape |
-| `coralogix` | Coralogix alert JSON |
-| `splunk` | Splunk notable-event style |
-
-</Accordion>
-
-<Accordion title="/last">
-
-Reprint the root cause and report sections from the most recent successful investigation in **this session**.
-
-```text
-/last
-```
-
-Sections rendered when present: **Root Cause**, **Report** (from `problem_md` or `slack_message`). If no investigation ran yet, prints a dim empty-state message.
-
-</Accordion>
-
-<Accordion title="/save">
-
-Write the last investigation to disk. Requires confirmation unless trust mode is on.
-
-```text
-/save report.md
-/save out.json
-/save ./rca/checkout-502.json
-```
-
-| Extension | Output |
-| --- | --- |
-| `.json` | Full investigation state object (machine-readable) |
-| Other (`.md`, `.txt`, …) | Markdown with `## Root Cause` and `## Report` sections |
-
-Parent directories must exist or be creatable; write failures print the underlying error.
-
----
-
-</Accordion>
-
-</AccordionGroup>
-
 ### Integrations, models, and tools
 <AccordionGroup>
 <Accordion title="Choosing the right diagnostic command">
@@ -694,7 +583,7 @@ MCP-capable integrations only (subset of the full integration catalog).
 
 <Accordion title="/model">
 
-Show or change LLM provider and models. Updates project `.env` (default: repository root `.env`, override with `OPENSRE_PROJECT_ENV_PATH`), `~/.opensre/opensre.json`, and resets in-process LLM caches.
+Show the active hosted model. An authenticated interactive shell is account-managed, so local provider/model changes are locked until sign-out; signing out closes the shell.
 
 ```text
 /model show
@@ -709,17 +598,17 @@ Show or change LLM provider and models. Updates project `.env` (default: reposit
 
 | Subcommand | Behavior |
 | --- | --- |
-| `show` (default) | Provider, reasoning model env var, toolcall model env var |
-| `set &lt;provider&gt; [model] [--toolcall-model &lt;m&gt;]` | Switch provider; optional per-slot models |
-| `set &lt;model&gt;` (no provider) | Update reasoning model for **current** provider only |
-| `restore [provider]` | Reset to provider's default reasoning model |
-| `toolcall set &lt;model&gt;` | Set investigation tool-call model for active provider |
+| `show` (default) | Show provider and reasoning/toolcall model slots |
+| `set &lt;provider&gt; [model] [--toolcall-model &lt;m&gt;]` | Refuse the local change while the account route is active |
+| `set &lt;model&gt;` (no provider) | Refuse the local change while the account route is active |
+| `restore [provider]` | Refuse the local change while the account route is active |
+| `toolcall set &lt;model&gt;` | Refuse the local change while the account route is active |
 
-**Credential guard:** Switching to a provider without prompt-safe auth status fails fast with setup instructions. Run `/auth login &lt;provider&gt;` or export the provider API key before switching. If status is stale, run `/auth verify &lt;provider&gt;`.
+**Account lock:** `set`, `restore`, and `toolcall set` explain that the model is managed by the OpenSRE account and make no change. The account route overrides local provider variables for every model role while the session is signed in.
 
-**Reasoning vs toolcall model:** Reasoning model drives chat and planning; toolcall model drives investigation tool invocation when the provider exposes a separate slot (common on Anthropic/OpenAI).
+**Bare `/model`:** in a terminal this opens a menu rather than printing the table. The menu stays open: `show` prints the current models and hands you back to it, so leave with **done** or Esc. `set`, `restore` and `toolcall` close it once the change succeeds. Use `/model show` when you only want the table.
 
-Interactive `/model` menu flow: pick provider → reasoning model (or default) → optional toolcall model (`keep`, `match-reasoning`, or explicit).
+**Reasoning vs toolcall model:** Reasoning model drives chat and planning; toolcall model drives tool invocation when the provider exposes a separate slot (common on Anthropic/OpenAI).
 
 See [LLM providers](/llm-providers).
 
@@ -727,7 +616,7 @@ See [LLM providers](/llm-providers).
 
 <Accordion title="/tools">
 
-List tools available to investigation and chat surfaces in this build (name, source, surfaces).
+List tools available to the chat and action surfaces in this build (name, source, surfaces).
 
 ```text
 /tools
@@ -795,10 +684,7 @@ Human todos and reminders are tracked separately by `/work`.
 
 | Kind | Source |
 | --- | --- |
-| `investigation` | `/investigate`, streamed free-text investigations |
-| `watchdog` | `/watch` |
-| `synthetic_test` | `/tests synthetic`, CloudOpsBench |
-| `cli_command` | Other `/tests` runs, delegated CLI subprocesses |
+| `cli_command` | Delegated CLI subprocesses |
 | `code_agent` | Code-agent integrations (when used) |
 
 </Accordion>
@@ -815,6 +701,30 @@ Human todos and reminders are tracked separately by `/work`.
 
 </Accordion>
 
+<Accordion title="/gateway">
+
+Control the background OpenSRE gateway daemon, which runs the web health app, Telegram chat, and the task scheduler. Scheduled work needs a scheduler running: this daemon, or `opensre cron start` in the foreground.
+
+```text
+/gateway
+/gateway start
+/gateway stop
+/gateway status
+/gateway logs
+/gateway logs 100
+```
+
+| Subcommand | Behavior |
+| --- | --- |
+| `status` (default) | Running state and pid, plus a line per component |
+| `start` | Start the daemon in the background |
+| `stop` | Stop the running daemon |
+| `logs [lines]` | Tail the log, 30 lines by default |
+
+Logs are written to `~/.opensre/gateway/gateway.log`. Same daemon as `opensre gateway`.
+
+</Accordion>
+
 <Accordion title="/tasks">
 
 ```text
@@ -827,11 +737,10 @@ Example:
   Tasks
 
   id      kind           status     started (UTC)     duration  detail
-  abc12   investigation  running    2026-06-17 10:01  45.2s     streaming…
-  def34   watchdog       completed  2026-06-17 09:55  120.0s    pid=12345 max_cpu=80%
+  def34   cli_command    completed  2026-06-17 09:55  120.0s    opensre health
 ```
 
-Shows up to **50** recent tasks, newest first. Use the **id** column (short prefix) with `/cancel` or `/unwatch`.
+Shows up to **50** recent tasks, newest first. Use the **id** column (short prefix) with `/cancel`.
 
 </Accordion>
 
@@ -845,7 +754,11 @@ Shows up to **50** recent tasks, newest first. Use the **id** column (short pref
 /work path
 ```
 
-Human todos, reminders, and follow-ups — separate from `/tasks` (runtime jobs). See [Work Management](/work-management).
+`/work add` creates durable human todos; it does not schedule reminder delivery.
+For reminders, use the destination-aware `opensre work add` command with
+`--remind-at` and `--target provider:chat-id`, or ask from a connected chat whose
+destination OpenSRE can reuse. These work items are separate from `/tasks`
+(runtime jobs). See [Work Management](/work-management).
 
 You can also ask naturally:
 
@@ -864,8 +777,6 @@ What should I focus on next?
 
 - Matches task id by **prefix** (must be unique among active/recent tasks)
 - Only **running** tasks accept cancellation
-- Investigations: signals cancel; press **Ctrl+C** if streaming continues
-- Watchdogs: prefer `/unwatch` for watchdog-specific messaging
 
 </Accordion>
 
@@ -879,115 +790,8 @@ Prints guidance only — does not kill processes:
 
 | Situation | Action |
 | --- | --- |
-| Streaming investigation | **Ctrl+C** |
-| Background test or CLI task | `/tasks` → `/cancel &lt;id&gt;` |
-| Watchdog | `/unwatch &lt;id&gt;` or `/cancel &lt;id&gt;` |
-
-</Accordion>
-
-<Accordion title="/background">
-
-Session-local async investigation mode. Launch an RCA, keep using the shell, and get the finished report delivered to email, Telegram, Rocket.Chat, or Buzz.
-
-| Subcommand | What it does |
-| --- | --- |
-| `/background on` \| `off` | Enable or disable async investigation launches |
-| `/background status` | Mode, tracked job count, and active notify channels |
-| `/background list` | Tracked jobs with status and root cause |
-| `/background show &lt;task_id&gt;` | Full RCA summary plus per-channel notification result |
-| `/background use &lt;task_id&gt;` | Promote a completed RCA into active follow-up context |
-| `/background notify list` | Show the current completion channels |
-| `/background notify set &lt;channel[,channel...]&gt;` | Set channels — `email`, `telegram`, `rocketchat`, `buzz`, or a combination |
-
-```text
-/background on
-/background notify set email,telegram
-/investigate datadog
-/background show &lt;task_id&gt;
-```
-
-Channels are **off by default**. They are cleared when the REPL process exits; `/new` keeps notify prefs but clears jobs and turns background mode off. `email` requires [`smtp`](/smtp); `telegram` requires [`telegram`](/messaging/telegram); `rocketchat` requires [`rocketchat`](/messaging/rocketchat); `buzz` requires [`buzz`](/messaging/buzz). Interactive shell only — there is no `opensre background …` CLI command. Full guide: [Background investigations](/background-investigations).
-
----
-
-</Accordion>
-
-</AccordionGroup>
-
-### Watchdog
-Monitor a local process and send **Telegram** alarms when CPU, memory, or runtime thresholds breach. Configure Telegram credentials before use (via `/integrations setup telegram` or env — see messaging docs).
-
-<AccordionGroup>
-<Accordion title="/watch">
-
-```text
-/watch 12345 --max-cpu 80 --max-rss 512M --max-runtime 30m --cooldown 5m --interval 2s --once
-```
-
-| Flag | Meaning | Default |
-| --- | --- | --- |
-| `&lt;pid&gt;` | Process to watch (required first arg) | — |
-| `--max-cpu` | CPU percent threshold (max ≈ `100 × cpu_count`) | none |
-| `--max-rss` | Resident memory cap (`512M`, `1G`, `1.5Gib`) | none |
-| `--max-runtime` | Wall-clock limit (`30s`, `5m`, `1h`) | none |
-| `--cooldown` | Min seconds between repeat alarms | `300` (5m) |
-| `--interval` | Sample period | `2s` |
-| `--once` | At most one alarm per threshold type | off |
-
-On start:
-
-```text
-task abc12 started.
-```
-
-When a threshold fires (Telegram configured):
-
-```text
-[task abc12] alarm fired: max_cpu … (telegram delivered)
-```
-
-**Typical demo workflow:**
-
-1. `/trust on` (optional — skips `/watch` confirmation)
-2. `/watch &lt;pid&gt; --max-cpu 80` — use a real PID (e.g. the REPL's Python process)
-3. `/watches` — confirm `running` status and threshold string
-4. `/unwatch abc12` — request stop; `/watches` should show `cancelled`
-
-Quoted values are supported: `/watch 12345 --max-cpu "80"`.
-
-</Accordion>
-
-<Accordion title="/watches">
-
-```text
-/watches
-```
-
-Watchdog-only view with columns: id, pid, status, started, thresholds (from command summary), **last sample** (live CPU/RSS from progress line).
-
-</Accordion>
-
-<Accordion title="/unwatch">
-
-```text
-/unwatch abc12
-```
-
-Cancels a **watchdog** task by task id. Using `/cancel` also works; `/unwatch` validates the task kind.
-
-</Accordion>
-
-<Accordion title="/watchdog">
-
-CLI-parity syntax (subprocess to `opensre watchdog`):
-
-```text
-/watchdog --pid 12345 --max-rss 1G --max-cpu 80
-```
-
-Prefer `/watch` inside the REPL — it registers tasks for `/watches` and `/tasks` automatically.
-
----
+| Streaming turn | **Ctrl+C** |
+| Background CLI task | `/tasks` → `/cancel &lt;id&gt;` |
 
 </Accordion>
 
@@ -1032,6 +836,18 @@ Fleet coordination is documented further on [Agents](/fleet). Register discovere
 
 </Accordion>
 
+<Accordion title="/choose">
+
+Reopen the selection menu the agent is waiting on. Useful when the menu scrolled away, or you dismissed it with Esc and want it back.
+
+```text
+/choose
+```
+
+Prints `No selection menu is pending.` when the agent has not asked anything. Outside a TTY it lists the options as text for you to answer in a reply instead of opening a picker — except for a pending onboarding demo choice, which it drops with "Guided demo selection is unavailable here", leaving you to ask for what you want directly.
+
+</Accordion>
+
 <Accordion title="/alerts">
 
 ```text
@@ -1047,7 +863,7 @@ When the alert listener is active:
 | `dropped` | Alerts dropped when queue was full |
 | `recent` | Up to 5 latest alert names/snippets |
 
-If the listener is inactive, prints a warning. Incoming alerts also appear in `/status` as `incoming alerts`. Post alerts to your configured webhook/listener URL during setup; the REPL can start investigations from plain language.
+If the listener is inactive, prints a warning. Incoming alerts also appear in `/status` as `incoming alerts`. Post alerts to your configured webhook/listener URL during setup; the REPL triages them in chat.
 
 ---
 
@@ -1065,10 +881,22 @@ These spawn `opensre …` subprocesses. Output is captured into the REPL buffer 
 /account
 /account login
 /account status
+/account usage
 /account logout
 ```
 
-Sign in to a personal OpenSRE account with GitHub, inspect the local login, or sign out. Same as `opensre account`. Interactive login opens a browser and prompts on the real TTY. If `OPENSRE_ACCOUNT_TOKEN` is set in the environment, it overrides the token saved by login until you unset it.
+Sign in to a personal OpenSRE account, inspect the local login, open the credits and top-up page (`/account usage`, opens your browser; from a chat it replies with the link), or sign out. Same as `opensre account`. The browser opens the OpenSRE sign-up page, where you can use email or any enabled sign-in provider. The shell starts only for an `active` account state. `/account logout` revokes the saved session, invalidates the hosted-model route, and closes the shell before another turn. If `OPENSRE_ACCOUNT_TOKEN` is set in the environment, it overrides the token saved by login until you unset it.
+
+</Accordion>
+
+<Accordion title="/setup">
+
+```text
+/setup
+/setup --dev
+```
+
+Run the first-use webapp account flow. It creates or signs in to an OpenSRE account using email or another enabled provider and activates the account-hosted model. Use `--dev` for a webapp running at `http://localhost:3000`. Setup requires exclusive stdin because browser authorization prompts on the real TTY.
 
 </Accordion>
 
@@ -1106,7 +934,7 @@ Shortcut for `/auth login`. Same provider flows as `opensre auth login`.
 /onboard local_llm
 ```
 
-First-run setup: LLM keys, integrations, Telegram, alert listener. A blank LLM key defers provider setup instead of blocking the wizard. Requires exclusive stdin — the REPL tears down prompt_toolkit before the wizard runs.
+Optional local LLM-provider onboarding. The account-hosted route remains authoritative while signed in, so this does not switch the model used by the interactive shell.
 
 </Accordion>
 
@@ -1114,13 +942,12 @@ First-run setup: LLM keys, integrations, Telegram, alert listener. A blank LLM k
 
 ```text
 /remote health
-/remote investigate
 /remote ops
 /remote pull
 /remote trigger
 ```
 
-Operate remote deployed OpenSRE agents (EC2, Nitro, hosted runtime). See [Remote runtime investigation](/remote-runtime-investigation).
+Operate remote deployed OpenSRE agents (EC2, Nitro, hosted runtime).
 
 </Accordion>
 
@@ -1159,7 +986,7 @@ Read/write `~/.opensre/config.yml`. Prefer env vars for secrets; use config for 
 /cron logs &lt;id&gt;
 ```
 
-Scheduled investigation or report delivery. See [Cron](/cron).
+Scheduled report delivery. See [Cron](/cron).
 
 </Accordion>
 
@@ -1169,7 +996,11 @@ Scheduled investigation or report delivery. See [Cron](/cron).
 /loops
 /loops active
 /loops all
+/loops show
+/loops show &lt;name-or-id&gt;
+/loops show &lt;name-or-id&gt; --run &lt;run-id&gt;
 /loops add --name "Morning ops" --time 08:30 --prompt "Check open incidents and summarize production risk" --run-now
+/loops add --name "CI fix agent" --cron "*/30 * * * * *" --mode agent --prompt "Repair failing PR checks with fix_github_pr_ci"
 /loops run &lt;loop_id&gt;
 /loops stop &lt;loop_id&gt;
 /loops start &lt;loop_id&gt;
@@ -1178,7 +1009,13 @@ Scheduled investigation or report delivery. See [Cron](/cron).
 /loops messages
 ```
 
-List recurring loops from the scheduler store, create manual prompt loops, run a loop once immediately, stop or restart a loop, delete a loop, and debug the next fire time. Onboarding creates draft examples such as a weekday morning report; active loops run through the cron scheduler when the gateway or `opensre cron start` is running.
+List recurring loops from the scheduler store, create manual prompt loops, run a loop once immediately, stop or restart a loop, delete a loop, and debug the next fire time. By default a loop tick only produces a report; add `--mode agent` when the tick should act with tools (for example edit and push CI fixes). Onboarding creates draft examples such as a weekday morning report; active loops run through the cron scheduler when the gateway or `opensre cron start` is running.
+
+Agent-mode prompts must contain the complete task and name the tools to use; each tick starts a fresh session without loading workflow skills. For the CLI equivalent, use `opensre cron add --kind manual_loop --mode agent` with your prompt and schedule. Existing loops retain their stored mode; check `/loops show <id>` before reusing one.
+
+The list shows each loop's latest finding and run status, plus its next scheduled time in your local timezone. Failed and quiet runs replace the previous result in the table.
+
+Use `/loops show` to pick a loop, or pass its name or ID directly. Details contain the full report, recent runs, and configuration. Open an earlier report with the run ID shown in its history. New reports are retained even when delivery fails; older reports may be unavailable.
 
 You can also ask naturally:
 
@@ -1219,17 +1056,7 @@ Requires Sentry plus Telegram or Slack configured for the chosen provider. See [
 /messaging status
 ```
 
-Telegram bot pairing and sender allowlist — required for `/watch` alarms and some delivery features.
-
-</Accordion>
-
-<Accordion title="/hermes">
-
-```text
-/hermes watch
-```
-
-Tail Hermes logs and escalate classified incidents. See [Hermes](/hermes) and [Hermes runbook](/hermes_runbook).
+Telegram bot pairing and sender allowlist for two-way chat and delivery features.
 
 </Accordion>
 
@@ -1253,28 +1080,6 @@ Related: [Masking](/masking).
 
 </Accordion>
 
-<Accordion title="/tests">
-
-```text
-/tests
-/tests list
-/tests run &lt;test_id&gt;
-/tests synthetic
-/tests cloudopsbench
-/tests synthetic --scenario &lt;name&gt;
-```
-
-| Form | Behavior |
-| --- | --- |
-| Bare `/tests` | Interactive multi-select picker; chosen tests run in background |
-| `list` | Print inventoried tests (captured output) |
-| `run`, `synthetic`, `cloudopsbench` | Background task — monitor with `/tasks` |
-| Flags after subcommand | Passed through to CLI |
-
-Synthetic tests can run for a long time; default timeout is generous — use `/cancel` to stop.
-
-</Accordion>
-
 <Accordion title="/update">
 
 ```text
@@ -1282,6 +1087,37 @@ Synthetic tests can run for a long time; default timeout is generous — use `/c
 ```
 
 Checks PyPI and upgrades OpenSRE in-place (5-minute network timeout). Non-zero exit prints CLI error code.
+
+</Accordion>
+
+<Accordion title="/posthog">
+
+Run or schedule automated PostHog per-metric summary reports. Requires the PostHog integration; see [PostHog](/posthog).
+
+```text
+/posthog report run
+/posthog report schedule list
+/posthog report schedule add
+/posthog report schedule run <id>
+/posthog report schedule remove <id>
+```
+
+A scheduled report only fires while a scheduler is running, so pair it with `/gateway start` or `opensre cron start`. Same as `opensre posthog`.
+
+</Accordion>
+
+<Accordion title="/runbooks">
+
+Manage the trusted runbook sources the agent may read during guided investigations. See [Runbook-guided investigations](/runbook-guided-investigations).
+
+```text
+/runbooks list
+/runbooks add github --name <name> --repo <owner/repo>
+/runbooks verify <name>
+/runbooks remove <name>
+```
+
+The agent reads runbooks only from sources listed here; an untrusted repository, an unsafe path, or a non-Markdown document is rejected. Same as `opensre runbooks`.
 
 </Accordion>
 
@@ -1322,6 +1158,21 @@ Environment diagnostic distinct from `/health`:
 Checks Python version, venv, config paths, Docker availability, credential presence, and related local prerequisites. Each row: `ok`, `warn`, or `error` with detail text.
 
 Use **`/doctor`** before first install debugging; use **`/health`** before an incident to verify integrations.
+
+</Accordion>
+
+<Accordion title="/theme">
+
+Choose the shell colour theme. The choice persists to `interactive.theme` in `~/.opensre/config.yml`, so it survives restarts.
+
+```text
+/theme
+/theme nord
+```
+
+Bare `/theme` opens a picker with the current theme preselected, and needs a TTY. Passing a name sets it directly and reports an unknown name with the full list.
+
+Installed themes: `green`, `blue`, `amber`, `mono`, `red`, `pink`, `purple`, `orange`, `teal`, `lime`, `nord`, `dracula`, `solarized`, `gruvbox`, `webflux`, `sunset`. The default is `purple`.
 
 </Accordion>
 
@@ -1373,8 +1224,8 @@ Two controls decide whether the REPL prompts before an action:
 | Tier | Examples | Confirmation |
 | --- | --- | --- |
 | Exempt | `/help`, `/exit`, `/trust`, `/auto` | Never prompts |
-| Safe | `/status`, `/health`, `/investigate`, `/integrations list` | Read-only or standard risk |
-| Elevated | `/save`, `/watch`, `/cancel`, `/integrations remove`, `/fleet kill`, `/uninstall` | Prompt unless trust on |
+| Safe | `/status`, `/health`, `/integrations list` | Read-only or standard risk |
+| Elevated | `/cancel`, `/integrations remove`, `/fleet kill`, `/uninstall` | Prompt unless trust on |
 
 Non-TTY: actions that would ask **fail closed** (error message, no side effect).
 
@@ -1396,8 +1247,7 @@ You do not need to memorize every slash command. Examples:
 | "what's my token usage?" | `/cost` |
 | "verify datadog" | `/verify datadog` |
 | "show datadog config" | `/integrations show datadog` |
-| "switch to openai gpt-4.1" | `/model set openai gpt-4.1` |
-| "run the generic sample alert" | `/investigate generic` |
+| "show the active model" | `/model show` |
 | "list my past sessions" | `/sessions` |
 | "check health then list integrations" | `/health` then `/integrations list` |
 | "how do I configure Datadog?" | Doc-grounded answer (no mutating command) |
@@ -1413,7 +1263,6 @@ You do not need to memorize every slash command. Examples:
 | MCP servers | `/mcp list` |
 | Cron jobs | `/loops` or `/cron list` |
 | Past REPL sessions | `/sessions` |
-| Watchdog tasks | `/watches` |
 
 When the planner is uncertain, it asks for clarification or falls back to help — it does not silently run elevated commands.
 
@@ -1426,13 +1275,13 @@ Compound requests ("health then integrations") execute as an ordered sequence of
 ### First-time setup
 
 ```text
-/onboard
+/account status
 /health
 /verify
 /model show
 ```
 
-If you skip onboarding's LLM key, later turns that need a model point you at `/auth login` instead of a raw provider error. On first launch with no scheduled loops, the shell offers three starter loops — Escape skips. See [Scheduled deliveries](/cron).
+Run `opensre` to sign in before this workflow is reachable. Every launch opens the demo picker — Escape continues to the prompt. The recommended option analyzes CI/CD performance; see [CI/CD analytics demo](/cicd-analytics-demo).
 
 ### Incident triage (local)
 
@@ -1442,13 +1291,7 @@ If you skip onboarding's LLM key, later turns that need a model point you at `/a
 /health
 ```
 
-Paste alert text or:
-
-```text
-/investigate ./alerts/prod-502.json
-/last
-/save ./rca/prod-502.md
-```
+Paste alert text or describe the incident in plain language and the agent will triage it with your connected integrations.
 
 ### Pick up yesterday's thread
 
@@ -1463,20 +1306,12 @@ Continue chatting, then optionally:
 /new
 ```
 
-### Switch model mid-session
+### Inspect account and model state
 
 ```text
-/model set anthropic claude-sonnet-4-20250514
-/effort high
+/account status
+/model show
 /cost
-```
-
-### Monitor a runaway process
-
-```text
-/watch &lt;pid&gt; --max-cpu 90 --max-rss 2G --cooldown 10m
-/watches
-/unwatch &lt;task_id&gt;
 ```
 
 ### Debug integration failures
@@ -1494,12 +1329,11 @@ Continue chatting, then optionally:
 | Symptom | Try |
 | --- | --- |
 | `unknown command` | `/help`; check spelling; use suggested correction |
-| Elevated command blocked in CI | Use CLI equivalent (`opensre investigate …`) or run interactively |
+| Elevated command blocked in CI | Use the CLI equivalent or run interactively |
 | `/cost` shows zero | No LLM turns yet this session; chat once and retry |
 | `/resume` not found | Run `/sessions`; use longer ID prefix |
 | `/resume` ambiguous prefix | Add more characters from Session ID column |
-| `/model set` missing credential | `/auth login &lt;provider&gt;` or export `ANTHROPIC_API_KEY` / etc.; use `/auth verify &lt;provider&gt;` for stale metadata |
-| `/watch` Telegram error | Configure messaging via `/messaging status` |
+| `/model set` reports an account lock | The hosted model is working as designed; `/account logout` closes the shell rather than switching it to a local provider |
 | `/integrations show` not found | Run `/integrations list` for exact service slug |
 | History pause not working | Requires redacting backend — see `/privacy` |
 | Garbage in next prompt after table | Known TTY issue — upgrade OpenSRE; report if persistent |
@@ -1511,10 +1345,25 @@ Continue chatting, then optionally:
 - [Goals](/goals) — `/goal` set, pause, resume, edit, clear
 - [Session History](/sessions) — persistence format, privacy, `/new` vs `/clear`
 - [Interactive Shell Privacy](/interactive-shell-privacy) — redaction, env vars, threat model
-- [Investigation overview](/investigation-overview) — RCA workflow, plain-language actions, CLI investigate
 - [LLM providers](/llm-providers) — `/model` and `/effort`
 - [Agents](/fleet) — fleet dashboard, bus, trace, budgets
 - [Cron](/cron) — `/cron` scheduled deliveries
-- [Hermes](/hermes) — `/hermes watch`
-- [Remote runtime investigation](/remote-runtime-investigation) — `/remote`
 - [Sync to your own object store](/configuration/remote-sync) — `/remote-sync`
+
+## Scheduled CI repair demo
+
+Choose scheduled CI repair from `/demo` to try a tiny failure in the private
+`opensre-onboarding-ci-repair-demo` repository. OpenSRE creates that repository
+once and reuses it, with a fresh branch and PR for each completed demonstration.
+An existing unrelated repository with that name stops setup.
+
+The demo starts on the next scheduled minute and has a ten-minute total limit.
+It uses the macOS or Linux background scheduler so it can finish after you close
+the terminal. Configure GitHub and authenticate your coding agent before starting.
+The initial run also needs permission to create a private repository and workflow.
+
+- Read the complete outcome and evidence links with `/loops show <task-id>`.
+- Stop an active repair with `/loops stop <task-id>`.
+- Starting the demo again while it is active returns the same run and deadline.
+- Successful runs close the demo PR and remove its branch. Unsuccessful runs keep
+  the PR, branch, and diagnostics. The repository and stopped loop history remain.

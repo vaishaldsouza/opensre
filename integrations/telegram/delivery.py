@@ -1,4 +1,4 @@
-"""Telegram delivery helper - posts investigation findings to Telegram Bot API."""
+"""Telegram delivery helper - posts messages to the Telegram Bot API."""
 
 from __future__ import annotations
 
@@ -166,8 +166,9 @@ def post_telegram_message(
             )
         else:
             error_message = response.text or f"HTTP {response.status_code}"
-        logger.warning("[telegram] post message failed: %s", error_message)
-        return False, error_message, ""
+        safe_error = redact_token(error_message, bot_token)
+        logger.warning("[telegram] post message failed: %s", safe_error)
+        return False, safe_error, ""
     result = response.data.get("result", {})
     message_id = str(result.get("message_id") or "") if isinstance(result, dict) else ""
     return True, "", message_id

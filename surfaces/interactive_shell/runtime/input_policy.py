@@ -26,14 +26,14 @@ _EXCLUSIVE_STDIN_MENU_COMMANDS: frozenset[str] = frozenset(
         # ``/choose`` renders the pending ask_user_choice arrow-key picker (raw
         # os.read on stdin), so the turn must own stdin exclusively.
         "/choose",
+        # ``/demo`` queues onboarding; finish it before reading the queued prompt.
+        "/demo",
         "/help",
         "/integrations",
-        "/investigate",
         "/mcp",
         "/memory",
         "/model",
         "/tools",
-        "/template",
         "/trust",
         "/verbose",
         "/?",
@@ -47,19 +47,15 @@ _EXCLUSIVE_STDIN_MENU_COMMANDS: frozenset[str] = frozenset(
         "/cost",
         "/tasks",
         "/loops",
-        "/watches",
         "/work",
         "/alerts",
         "/privacy",
         "/context",
         "/fleet",
         "/compact",
-        "/welcome",
         "/sessions",
         "/resume",
         "/new",
-        "/rca",
-        "/background",
         "/health",
     }
 )
@@ -77,14 +73,7 @@ _EXCLUSIVE_STDIN_SUBCOMMANDS: frozenset[tuple[str, str]] = frozenset(
         ("/loops", "inbox"),
         ("/loops", "list"),
         ("/loops", "messages"),
-        ("/background", "status"),
-        ("/background", "list"),
-        ("/background", "show"),
-        ("/rca", "history"),
-        ("/rca", "list"),
-        ("/rca", "ls"),
-        ("/rca", "show"),
-        ("/rca", "save"),
+        ("/loops", "show"),
     }
 )
 _WAIT_FOR_COMPLETION_COMMANDS: frozenset[str] = frozenset(
@@ -139,8 +128,6 @@ def turn_needs_exclusive_stdin(text: str, _session: Session) -> bool:
     if name == "/theme":
         return True
     if name in _EXCLUSIVE_STDIN_MENU_COMMANDS and not args:
-        return True
-    if name == "/tests" and not args:
         return True
     return bool(args and (name, args[0]) in _EXCLUSIVE_STDIN_SUBCOMMANDS)
 

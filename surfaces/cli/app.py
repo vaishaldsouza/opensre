@@ -1,4 +1,4 @@
-"""OpenSRE CLI - open-source SRE agent for automated incident investigation.
+"""OpenSRE CLI - open-source SRE agent.
 
 Enable shell tab-completion (add to your shell profile for persistence):
 
@@ -17,16 +17,21 @@ from typing import TYPE_CHECKING
 import click
 
 from config.constants.product import RELEASE_STAGE_BANNER
-from config.version import get_opensre_version
 from surfaces.cli import startup
 from surfaces.cli.group import LazyRichGroup, ThemeParamType
-from surfaces.cli.host import CLI_HOST_CONTEXT_KEY, CliHost, ShellLauncher, cli_host
+from surfaces.cli.host import (
+    CLI_HOST_CONTEXT_KEY,
+    AfterBanner,
+    CliHost,
+    ShellLauncher,
+    cli_host,
+)
 from surfaces.cli.invocation import (
     ensure_utf8_stdio,
+    is_fast_help_invocation,
     is_fast_version_invocation,
     print_fast_version,
     resolve_command_parts,
-    try_fast_investigate_print_template,
 )
 from surfaces.cli.telemetry import (
     analytics_needs_flush,
@@ -35,6 +40,7 @@ from surfaces.cli.telemetry import (
     capture_exception,
     capture_first_run_if_needed,
     load_structured_error_type,
+    record_install_marker_state,
     render_landing,
     render_structured_error,
     report_exception,
@@ -45,14 +51,17 @@ from surfaces.cli.telemetry import (
 if TYPE_CHECKING:
     from infrastructure.analytics.provider import Properties
 
-# One-shot CLI exit: a queued or in-flight event (e.g. ``investigation_completed``)
-# dies with the process because the sender runs on a daemon thread, so wait briefly
-# for the POST to land before returning.
+# One-shot CLI exit: a queued or in-flight analytics event dies with the
+# process because the sender runs on a daemon thread, so wait briefly for the
+# POST to land before returning.
 _ANALYTICS_FLUSH_TIMEOUT_SECONDS = 2.0
 
 _CAPTURE_CLI_ANALYTICS = "capture_cli_analytics"
 _CLI_ANALYTICS_CAPTURED = "cli_analytics_captured"
 _CLI_ARGV = "cli_argv"
+_RECORD_INSTALL_ONLY = "record_install_only"
+# Launch work startup held back for the shell to run once its banner is painted.
+_AFTER_BANNER = "after_banner"
 
 
 def _cli_invoked_properties(ctx: click.Context) -> Properties:
@@ -79,7 +88,11 @@ def _capture_accepted_cli_invocation(ctx: click.Context) -> None:
     if ctx.obj.get(_CLI_ANALYTICS_CAPTURED, False):
         return
     ctx.obj[_CLI_ANALYTICS_CAPTURED] = True
+    if ctx.obj.get(_RECORD_INSTALL_ONLY, False):
+        record_install_marker_state()
     capture_first_run_if_needed()
+    if ctx.obj.get(_RECORD_INSTALL_ONLY, False):
+        return
     capture_cli_invoked(_cli_invoked_properties(ctx))
 
 
@@ -112,6 +125,7 @@ def _run_without_subcommand(
     passed_on_command_line: bool,
     layout: str | None,
     theme: str | None,
+    after_banner: AfterBanner,
 ) -> int:
     """Serve a bare ``opensre``: open the shell, or print the landing page.
 
@@ -134,13 +148,16 @@ def _run_without_subcommand(
             cli_theme=theme,
         )
         if config.enabled or resume_session_id:
-            exit_code = launch_shell(config, resume_session_id)
+            exit_code = launch_shell(config, resume_session_id, after_banner)
             if sync_on_exit:
                 from surfaces.cli.commands.remote_sync import run_remote_sync_on_exit
 
                 run_remote_sync_on_exit()
             return exit_code
 
+    # No shell to paint a banner: the held-back launch work runs here instead.
+    if after_banner is not None:
+        after_banner()
     click.echo(RELEASE_STAGE_BANNER, err=True)
     render_landing(group)
     return 0
@@ -151,7 +168,7 @@ def _run_without_subcommand(
     context_settings={"help_option_names": ["-h", "--help"]},
     invoke_without_command=True,
 )
-@click.version_option(version=get_opensre_version(), prog_name="opensre")
+@click.version_option(prog_name="opensre")
 @click.option(
     "--json", "-j", "json_output", is_flag=True, help="Emit machine-readable JSON output."
 )
@@ -189,6 +206,12 @@ def _run_without_subcommand(
     help="Interactive-shell color palette. Overrides OPENSRE_THEME env var "
     "and ~/.opensre/config.yml interactive.theme.",
 )
+@click.option(
+    "--record-install",
+    is_flag=True,
+    hidden=True,
+    help="Record installer analytics and exit.",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -201,14 +224,16 @@ def cli(
     sync_on_exit: bool,
     layout: str | None,
     theme: str | None,
+    record_install: bool,
 ) -> None:
-    """OpenSRE - open-source SRE agent for automated incident investigation and root cause analysis."""
+    """OpenSRE - open-source SRE agent."""
     ctx.ensure_object(dict)
     ctx.obj["json"] = json_output
     ctx.obj["verbose"] = verbose
     ctx.obj["debug"] = debug
     ctx.obj["yes"] = yes
     ctx.obj["interactive"] = interactive
+    ctx.obj[_RECORD_INSTALL_ONLY] = record_install
 
     from surfaces.cli.runtime_flags import sync_runtime_flags_from_click
 
@@ -220,6 +245,9 @@ def cli(
     from config.repl_config import ReplConfig
 
     _capture_accepted_cli_invocation(ctx)
+
+    if record_install:
+        raise click.exceptions.Exit(0)
 
     if ctx.invoked_subcommand is None:
         interactive_source = ctx.get_parameter_source("interactive")
@@ -235,6 +263,7 @@ def cli(
                 ),
                 layout=layout,
                 theme=theme,
+                after_banner=ctx.obj.get(_AFTER_BANNER),
             )
         )
 
@@ -256,12 +285,8 @@ def main(argv: list[str] | None = None, *, host: CliHost | None = None) -> int:
     if is_fast_version_invocation(cli_argv):
         print_fast_version(cli_argv)
         return 0
-
-    print_template_exit = try_fast_investigate_print_template(cli_argv)
-    if print_template_exit is not None:
-        return print_template_exit
-
-    startup.run(cli, cli_argv)
+    fast_help = is_fast_help_invocation(cli, cli_argv)
+    after_banner = None if fast_help else startup.run(cli, cli_argv)
     StructuredError = load_structured_error_type()
 
     try:
@@ -271,6 +296,7 @@ def main(argv: list[str] | None = None, *, host: CliHost | None = None) -> int:
             obj={
                 _CAPTURE_CLI_ANALYTICS: True,
                 _CLI_ARGV: cli_argv,
+                _AFTER_BANNER: after_banner,
                 CLI_HOST_CONTEXT_KEY: host or CliHost(),
             },
         )
@@ -313,12 +339,14 @@ def main(argv: list[str] | None = None, *, host: CliHost | None = None) -> int:
                 _sentry_sdk.flush(timeout=2)
         raise
     finally:
-        # Drain pending events so one-shot runs do not lose them, and stay
-        # non-blocking when the worker is idle.
-        if analytics_needs_flush():
-            shutdown_analytics(flush=True, timeout=_ANALYTICS_FLUSH_TIMEOUT_SECONDS)
-        else:
-            shutdown_analytics(flush=False)
+        # Help never starts analytics; importing the provider here would
+        # resolve the git version and fingerprint just to ask if a flush
+        # is needed.
+        if not fast_help:
+            if analytics_needs_flush():
+                shutdown_analytics(flush=True, timeout=_ANALYTICS_FLUSH_TIMEOUT_SECONDS)
+            else:
+                shutdown_analytics(flush=False)
     return 0
 
 

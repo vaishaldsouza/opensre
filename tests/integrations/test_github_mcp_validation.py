@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from mcp import types as mcp_types
 from rich.console import Console
@@ -840,6 +842,41 @@ def test_connectivity_failure_detail_unwraps_taskgroup_exception_group() -> None
     assert "Check: outbound HTTPS" in msg
 
 
+def test_validate_github_mcp_config_reports_scope_challenge_as_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "https://api.githubcopilot.com/mcp/x/all/readonly")
+    response = httpx.Response(
+        HTTPStatus.FORBIDDEN,
+        request=request,
+        headers={
+            "WWW-Authenticate": ('Bearer error="insufficient_scope", scope="repo security_events"')
+        },
+    )
+    failure = httpx.HTTPStatusError("scope rejected", request=request, response=response)
+
+    @asynccontextmanager
+    async def _failing_open(_config: Any):  # type: ignore[return]
+        raise ExceptionGroup("MCP transport", [failure])
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("integrations.github.mcp._open_github_mcp_session", _failing_open)
+    cfg = github_mcp_module.build_github_mcp_config(
+        {
+            "url": "https://api.githubcopilot.com/mcp/",
+            "mode": "streamable-http",
+            "auth_token": "gho_test",
+        }
+    )
+
+    result = github_mcp_module.validate_github_mcp_config(cfg)
+
+    assert result.ok is False
+    assert result.failure_category == "authentication"
+    assert "repo, security_events" in result.detail
+    assert "account login" in result.detail
+
+
 def test_validate_github_mcp_config_reports_session_open_failure_as_connectivity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1018,3 +1055,51 @@ def test_github_integration_is_configured_true_when_store_has_token(
     monkeypatch.setattr(github_mcp_module, "github_mcp_config_from_env", lambda: None)
 
     assert github_mcp_module.github_integration_is_configured() is True
+
+
+@pytest.mark.asyncio
+async def test_open_session_accepts_legacy_two_stream_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older streamable-HTTP clients yield ``(read, write)`` only."""
+    read, write = object(), object()
+    opened: list[object] = []
+
+    @asynccontextmanager
+    async def _two_stream_client(*_args: Any, **_kwargs: Any):
+        yield (read, write)
+
+    class _HttpClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def __aenter__(self) -> _HttpClient:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _Session:
+        def __init__(self, read_stream: Any, write_stream: Any) -> None:
+            assert read_stream is read
+            assert write_stream is write
+            opened.append(self)
+            self.initialize = AsyncMock()
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(github_mcp_module, "streamable_http_client", _two_stream_client)
+    monkeypatch.setattr(github_mcp_module.httpx, "AsyncClient", _HttpClient)
+    monkeypatch.setattr("mcp.client.session.ClientSession", _Session)
+
+    config = github_mcp_module.GitHubMCPConfig(
+        url="https://mcp.example.test/mcp",
+        mode="streamable-http",
+    )
+    async with github_mcp_module._open_github_mcp_session(config) as session:
+        assert session is opened[0]
+        session.initialize.assert_awaited_once()

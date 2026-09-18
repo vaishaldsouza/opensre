@@ -169,12 +169,11 @@ def _build_cli_reference_text_uncached(
 
 def _interactive_shell_slash_hints(provider: SlashCommandProvider | None = None) -> str:
     lines = [
-        "In the interactive shell, describe an incident or paste alert JSON to run "
-        + "a investigation pipeline, or chat with the terminal assistant for CLI help.",
-        "Alpha mode runs every shell command with no guardrails: plain commands are parsed to "
-        + "argv and run without a shell, while pipes, redirects, command substitution, and a "
-        + "leading ! all run through a full shell. There is no read-only allowlist or blocked "
-        + "command list.",
+        "In the interactive shell, chat with the terminal assistant to run tools "
+        + "or get CLI help.",
+        "Every nonempty shell command runs through the platform command shell.",
+        "This includes plain commands, pipes, redirects, substitutions, and compact operators.",
+        "A leading ! is optional.",
         "Slash commands:",
         "",
     ]
@@ -189,7 +188,6 @@ def _interactive_shell_slash_hints(provider: SlashCommandProvider | None = None)
     lines.extend(
         [
             "",
-            "Non-interactive investigation: `opensre investigate` with stdin, file, or flags.",
             "Launch the interactive shell: `opensre` (requires a TTY).",
         ]
     )

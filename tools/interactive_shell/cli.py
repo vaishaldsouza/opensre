@@ -56,12 +56,9 @@ _READ_ONLY_INTEGRATIONS_SUBCOMMANDS: frozenset[str] = frozenset(
     }
 )
 
-INVESTIGATION_OPENSRE_SUBCOMMANDS: frozenset[str] = frozenset({"investigate"})
-
 
 class OpensreCommandClass(StrEnum):
     READ_ONLY = "read_only"
-    INVESTIGATION = "investigation"
     MUTATING = "mutating"
 
 
@@ -169,8 +166,6 @@ def classify_opensre_command(tokens: list[str]) -> str:
         return OpensreCommandClass.READ_ONLY.value
     if _is_read_only_integrations(tokens):
         return OpensreCommandClass.READ_ONLY.value
-    if first_token in INVESTIGATION_OPENSRE_SUBCOMMANDS:
-        return OpensreCommandClass.INVESTIGATION.value
     if first_token == "fleet":
         subcommand = tokens[1].lower() if len(tokens) > 1 else "list"
         if subcommand in {"list"}:
@@ -255,7 +250,14 @@ def run_foreground_cli(
     argv_list: list[str],
     *,
     timeout_seconds: int = SHELL_COMMAND_TIMEOUT_SECONDS,
+    env: dict[str, str] | None = None,
 ) -> ForegroundCliResult:
+    """Run an opensre CLI child to completion, capturing both streams.
+
+    Pass the presenter's ``subprocess_env()`` as ``env``: the child's stdout is
+    a pipe, so without ``COLUMNS`` Rich renders at 80 and ellipsizes table cells
+    the action agent needs whole (task ids).
+    """
     try:
         completed = subprocess.run(
             argv_list,
@@ -265,6 +267,7 @@ def run_foreground_cli(
             errors="replace",
             timeout=timeout_seconds,
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         return ForegroundCliResult(
@@ -292,7 +295,11 @@ def run_foreground_cli(
     )
 
 
-def spawn_streaming_cli(argv_list: list[str]) -> subprocess.Popen[str]:
+def spawn_streaming_cli(
+    argv_list: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen[str]:
     return subprocess.Popen(
         argv_list,
         stdout=subprocess.PIPE,
@@ -300,6 +307,7 @@ def spawn_streaming_cli(argv_list: list[str]) -> subprocess.Popen[str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
 
 
@@ -319,7 +327,11 @@ def _run_foreground_via_presenter(
     display_command: str,
 ) -> None:
     presenter.print_bold_command(display_command)
-    result = run_foreground_cli(argv_list, timeout_seconds=SHELL_COMMAND_TIMEOUT_SECONDS)
+    result = run_foreground_cli(
+        argv_list,
+        timeout_seconds=SHELL_COMMAND_TIMEOUT_SECONDS,
+        env=presenter.subprocess_env(),
+    )
     if result.start_failed:
         if result.start_error:
             presenter.report_exception(
@@ -351,7 +363,7 @@ def _run_streaming_via_presenter(
 ) -> None:
     presenter.print_bold_command(display_command)
     try:
-        proc = spawn_streaming_cli(argv_list)
+        proc = spawn_streaming_cli(argv_list, env=presenter.subprocess_env())
     except Exception as exc:  # noqa: BLE001
         presenter.report_exception(
             exc,
@@ -462,7 +474,6 @@ def run_opensre_cli_command(args: str, presenter: SubprocessPresenter) -> bool:
 __all__ = [
     "ForegroundCliResult",
     "INTERACTIVE_OPENSRE_COMMAND_PATHS",
-    "INVESTIGATION_OPENSRE_SUBCOMMANDS",
     "OPENSRE_BLOCKED_SUBCOMMANDS",
     "READ_ONLY_OPENSRE_SUBCOMMANDS",
     "OpensreCommandClass",

@@ -60,10 +60,11 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         anti_examples=("User asks a docs/how-to question about OpenSRE features",),
     ),
     "/account": _mcp(
-        "Sign in to a personal OpenSRE account with GitHub, inspect the local login, "
-        "or sign out. Subcommands: login, status, logout.",
-        "User asks to sign in to OpenSRE with GitHub or create a personal account",
-        "User asks whether they are logged into OpenSRE or which GitHub user is linked",
+        "Sign in to a personal OpenSRE account, inspect the local login, open the "
+        "credits and top-up page, or sign out. Signing out closes the interactive "
+        "shell. Subcommands: login, status, usage, logout.",
+        "User asks to sign in to OpenSRE or create a personal account",
+        "User asks whether they are logged into OpenSRE",
         anti_examples=(
             "User asks to log in to an LLM provider (use /auth)",
             "User asks to configure the GitHub integration only (use /integrations)",
@@ -73,7 +74,6 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         "Show status of the local alert listener inbox: queue depth, dropped count, "
         "and the most recent ingested alerts.",
         "User asks about the alert inbox, listener, or queued alerts",
-        anti_examples=("User wants to investigate an alert body (use investigation_start)",),
     ),
     "/auth": _mcp(
         "Log in to LLM providers and inspect local auth state. Subcommands: login, status, logout.",
@@ -81,17 +81,10 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         anti_examples=("User asks to configure an observability integration (use /integrations)",),
     ),
     "/auto": _mcp(
-        "Set Auto autonomy: off (ask before every tool), low (also ask before investigations), "
+        "Set Auto autonomy: off (ask before every tool), low, "
         "med (ask before mutating agent tools), high (ask nothing, alpha default).",
         "User asks to change Auto Off/Low/Med/High or how much the agent may run without approval",
         anti_examples=("User asks to enable trust mode (use /trust)",),
-    ),
-    "/background": _mcp(
-        "Manage session-local background investigation mode and completed RCA summaries. "
-        "Subcommands: on, off, status, list, show <task_id>, use <task_id>, notify list, notify set.",
-        "User asks to enable or disable background investigation mode",
-        "User asks to list or inspect completed background RCAs",
-        "User asks to configure background RCA notification channels",
     ),
     "/cancel": _mcp(
         "Cancel a running background task by task id. Requires confirmation in non-trust mode.",
@@ -169,6 +162,14 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         "User asks to change reasoning effort or depth for the active model",
         anti_examples=("User asks to switch provider or model name (use /model)",),
     ),
+    "/demo": _mcp(
+        "Open the guided demo picker that runs on real repositories from this machine "
+        "(CI/CD analytics, CI reliability agent, Slack handoff).",
+        "User asks to run a demo, see what OpenSRE can do, or replay the first-run demo menu",
+        anti_examples=(
+            "User names a specific repository to analyze (call the analytics tool directly)",
+        ),
+    ),
     "/exit": _mcp(
         "Exit the interactive shell and return to the parent terminal.",
         "User asks to exit, quit, or leave the REPL",
@@ -209,10 +210,6 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         "User asks for available commands or help using /help",
         anti_examples=("User asks a procedural docs question (answer directly)",),
     ),
-    "/hermes": _mcp(
-        "Live-tail Hermes logs and send detected incidents to Telegram. Subcommand: watch.",
-        "User asks to watch Hermes logs or Hermes incident escalation",
-    ),
     "/history": _mcp(
         "Manage persisted command history: clear, off, on, retention <N>.",
         "User asks to clear, disable, or configure command history persistence",
@@ -226,19 +223,6 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
             "User asks to list connected integrations (prefer /integrations list)",
         ),
     ),
-    "/investigate": _mcp(
-        "Run an RCA investigation from a local alert file path or a built-in sample template.",
-        "User asks to investigate a file path or run RCA from a saved alert file",
-        "User asks to run one of the built-in sample alerts/templates",
-        anti_examples=(
-            "User pastes alert text inline (use investigation_start instead)",
-            "User asks how investigations work (answer directly)",
-        ),
-    ),
-    "/last": _mcp(
-        "Reprint the most recent investigation report from this session.",
-        "User asks to show the last investigation result or report again",
-    ),
     "/login": _mcp(
         "Shortcut for /auth login. Supports subscription aliases chatgpt and claude, "
         "and API-key providers such as deepseek.",
@@ -247,21 +231,23 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
     ),
     "/loops": _mcp(
         "List, create, stop, start, delete, run once, and debug recurring prompt loops, "
-        "including next fire time. "
+        "including latest findings, execution status, and next fire time. "
         "Subcommands: list, active, all, add, run <id>, stop <id>, start <id>, delete <id>, "
-        "next <id>, messages. "
-        "Use add with --prompt, --time or --cron, optional --channel, and --run-now.",
+        "show [name-or-id] [--run <run-id>], next <id>, messages, service [install|remove]. "
+        "Use show to read full reports, run history, and loop configuration. "
+        "Use add with --prompt, --time or --cron, optional --channel, --run-now, and "
+        "--mode agent when the tick must act with tools (edit, push) instead of only reporting. "
+        "service installs, removes, or shows the background scheduler service that keeps "
+        "loops running when no shell is open.",
         "User asks to list active loops or recurring scheduled loops",
         "User asks when configured loops will run next",
+        "User asks what a loop found or wants to read its full report",
         "User asks to set up a manual recurring loop from a prompt",
         "User asks to add a loop and execute it once immediately",
         "User asks to stop, disable, resume, start, delete, or remove a recurring loop",
+        "User asks to keep loops running when the shell is closed, or to install, "
+        "check, or remove the background scheduler service",
         anti_examples=("User wants low-level cron task logs by task id (use /cron)",),
-    ),
-    "/rca": _mcp(
-        "Browse persisted RCA reports across sessions. Subcommands: history, show <id>, save <path>.",
-        "User asks for past RCA reports, investigation history, or to export a previous root-cause report",
-        anti_examples=("User asks for command history or up-arrow recall (use /history)",),
     ),
     "/mcp": _mcp(
         "Manage connected MCP servers. Subcommands: list, connect, disconnect.",
@@ -280,15 +266,6 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
     "/messaging": _mcp(
         "Manage messaging security and Telegram identities. Subcommands: pair, allow, revoke, status.",
         "User asks about Telegram pairing, messaging allowlist, or messaging status",
-    ),
-    "/misses": _mcp(
-        "Triage investigation misses and export them as benchmark regression scenarios. "
-        "Subcommands: list, stats, export --out <dir>, convert <miss_id>.",
-        "User asks about investigation misses, miss triage, or miss trends",
-        "User asks to convert recent misses into regression scenarios or evals",
-        anti_examples=(
-            "User asks for raw feedback ratings without taxonomy (read ~/.opensre/feedback.jsonl directly)",
-        ),
     ),
     "/model": _mcp(
         "Explicit /model command operations: show the model table, open the model menu, "
@@ -316,7 +293,7 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
     ),
     "/remote": _mcp(
         "Connect to, list, and operate remote deployed OpenSRE agents. "
-        "Subcommands: health, investigate, ops, pull, trigger.",
+        "Subcommands: health, ops, pull, trigger.",
         "User explicitly asks to connect to a remote/hosted/EC2/Nitro OpenSRE instance",
         "User asks how many remote deployments are configured or wants to inspect a remote agent",
         "User asks about remote deployment status, health, or operations",
@@ -346,20 +323,18 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
             "User asks to start a new session keeping context (use /new)",
         ),
     ),
-    "/save": _mcp(
-        "Save the last investigation report to a file path. Requires confirmation.",
-        "User asks to export or save the last investigation to disk",
-    ),
     "/sessions": _mcp(
         "List recent REPL sessions stored on disk. Shows session ID, start time, duration, "
-        "total turns, and investigation count for each session.",
+        "total turns, and chat turns for each session.",
         "User asks to see past sessions, session history, or what was run in previous sessions",
         anti_examples=("User asks for the current session status (use /status)",),
     ),
     "/setup": _mcp(
-        "First-run setup: GitHub sign-in, LLM key, then open the interactive shell.",
+        "First-run setup: OpenSRE account sign-in, hosted model, then the interactive shell. "
+        "Use --dev to authenticate against a local webapp at http://localhost:3000.",
         "User asks to run first-run setup or factory-style install setup",
-        "User just installed OpenSRE and needs to sign in and add an LLM key",
+        "User just installed OpenSRE and needs to create or sign in to an account",
+        "User is developing the webapp locally and needs opensre setup --dev",
     ),
     "/status": _mcp(
         "Explicit /status command operation: show REPL session status, including "
@@ -371,8 +346,8 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         ),
     ),
     "/stop": _mcp(
-        "Print guidance for stopping in-flight investigations and background tasks.",
-        "User asks how to stop a running investigation or background work",
+        "Print guidance for stopping in-flight background tasks.",
+        "User asks how to stop running background work",
         anti_examples=("User provides a task id to cancel (use /cancel)",),
     ),
     "/remote-sync": _mcp(
@@ -383,31 +358,31 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         "are never uploaded.",
         "User asks to sync, back up, set up remote sync, or restore conversations",
         anti_examples=(
-            "User asks to connect an AWS integration for investigations (use /integrations)",
+            "User asks to connect an AWS integration (use /integrations)",
             "User asks what opensre remembers (use /memory)",
+        ),
+    ),
+    "/runbooks": _mcp(
+        "Manage organization-owned runbook sources for guided investigations. "
+        "Subcommands: list, add, verify, remove.",
+        "User asks to configure, list, verify, or remove trusted runbook sources",
+        anti_examples=(
+            "User asks to investigate an incident with a runbook (use runbook guidance tooling)",
+            "User asks how runbook-guided investigations work (answer from docs)",
         ),
     ),
     "/tasks": _mcp(
         "List recent and in-flight shell background tasks with ids and status.",
         "User asks to list running or recent tasks",
     ),
-    "/template": _mcp(
-        "Print a starter alert JSON template (generic, datadog, grafana, honeycomb, coralogix, "
-        "splunk, new_relic).",
-        "User asks for an alert template or example payload format",
-    ),
     "/tools": _mcp(
-        "Explicit /tools command operation: list registered investigation/chat tools "
+        "Explicit /tools command operation: list registered chat/action tools "
         "wired into this OpenSRE build.",
         "User explicitly types /tools or asks to run /tools",
         "User explicitly asks to list registered tools as a shell command",
         anti_examples=(
             "User asks conversationally what tools or capabilities the agent can use (answer directly)",
         ),
-    ),
-    "/tests": _mcp(
-        "Browse and run inventoried tests from the terminal. Subcommands: list, run, synthetic.",
-        "User asks to list or run bundled tests via /tests",
     ),
     "/theme": _mcp(
         "Choose and persist the interactive shell color palette (TTY picker or /theme <name>).",
@@ -421,10 +396,6 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
     "/uninstall": _mcp(
         "Remove OpenSRE and all local data from this machine. Destructive — requires confirmation.",
         "User explicitly asks to uninstall OpenSRE locally",
-    ),
-    "/unwatch": _mcp(
-        "Cancel a running watchdog task by task id. Requires confirmation.",
-        "User asks to stop a /watch background task by id",
     ),
     "/update": _mcp(
         "Check for a newer OpenSRE version and update if available.",
@@ -448,25 +419,15 @@ MCP_BY_COMMAND: dict[str, _SlashMcpFields] = {
         "Print OpenSRE version, Python version, and OS information.",
         "User asks for version information",
     ),
-    "/watch": _mcp(
-        "Watch a process by PID and send Telegram threshold alarms. Requires confirmation.",
-        "User asks to watch a process or set resource threshold alarms",
-    ),
-    "/watchdog": _mcp(
-        "Monitor one process and send threshold alarms (CLI parity wrapper).",
-        "User asks to run the watchdog monitor CLI from the REPL",
-    ),
-    "/watches": _mcp(
-        "List active watchdog background tasks with latest resource samples.",
-        "User asks to list running watchdog watches",
-    ),
     "/work": _mcp(
-        "Manage durable human work items and reminders. Subcommands: list, add, done, next, path.",
+        "Manage durable human work items. Subcommands: list, add, done, next, path. "
+        "Reminder delivery requires the destination-aware work_task_* tools or opensre work CLI.",
         "User explicitly types /work to list, add, complete, or prioritize work items",
         "User asks for a durable task list or hackathon task overview via the slash command",
         anti_examples=(
             "User asks to manage OpenSRE runtime background jobs (use /tasks)",
-            "User asks in natural language to add or prioritize work (use work_task_* tools)",
+            "User asks in natural language to add, prioritize, or schedule work reminders "
+            "(use work_task_* tools)",
         ),
     ),
     "/debug": _mcp(
@@ -588,9 +549,9 @@ def slash_invoke_tool_description(specs: list[SlashCommandSpec] | None = None) -
         "only the slash-command clause of a request. For compound requests, "
         "still emit a separate tool call for every other actionable clause in "
         "order; for example "
-        '`run /remote and then investigate "hello world"` requires '
-        'slash_invoke(command="/remote", args=[]) followed by '
-        'investigation_start(alert_text="hello world").'
+        "`run /remote and then send a summary to Slack` requires "
+        'slash_invoke(command="/remote", args=[]) followed by the '
+        "Slack send-message tool call."
     )
     # Keep planner payload intentionally tiny for live LLM runs with strict
     # prompt budgets. The full rich catalog remains available via

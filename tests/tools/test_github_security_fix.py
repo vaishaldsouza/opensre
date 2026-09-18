@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -120,7 +121,9 @@ def test_parse_security_alert_url_supports_common_github_urls() -> None:
 
 
 def test_available_when_github_token_present(monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_MCP_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
     assert _github_security_fix_available({}) is False
 
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
@@ -579,7 +582,10 @@ def test_gather_auto_prefer_builtin_raises_without_running_fix() -> None:
 
 
 @patch("integrations.github.tools.security_fix.runner.run_fix")
-@patch("integrations.github.tools.security_fix.runner.ensure_workspace_ready")
+@patch(
+    "integrations.github.tools.security_fix.runner.repair_workspace",
+    side_effect=lambda *_a, **kw: nullcontext(kw.get("workspace") or "/workspace"),
+)
 @patch("integrations.github.tools.security_fix.runner.ensure_cli_ready")
 @patch(
     "integrations.github.tools.security_fix.runner.gather_security_alert_context",
@@ -619,7 +625,10 @@ def test_run_security_fix_confirms_before_coding(
 @patch("integrations.github.tools.security_fix.runner.pre_coding_changes", return_value={})
 @patch("integrations.github.tools.security_fix.runner.run_fix")
 @patch("integrations.github.tools.security_fix.runner.ensure_ship_ready")
-@patch("integrations.github.tools.security_fix.runner.ensure_workspace_ready")
+@patch(
+    "integrations.github.tools.security_fix.runner.repair_workspace",
+    side_effect=lambda *_a, **kw: nullcontext(kw.get("workspace") or "/workspace"),
+)
 @patch("integrations.github.tools.security_fix.runner.ensure_cli_ready")
 @patch(
     "integrations.github.tools.security_fix.runner.gather_security_alert_context",
@@ -669,7 +678,10 @@ def test_run_security_fix_denied_before_shipping_keeps_diff(
 @patch("integrations.github.tools.security_fix.runner.pre_coding_changes", return_value={})
 @patch("integrations.github.tools.security_fix.runner.run_fix")
 @patch("integrations.github.tools.security_fix.runner.ensure_ship_ready")
-@patch("integrations.github.tools.security_fix.runner.ensure_workspace_ready")
+@patch(
+    "integrations.github.tools.security_fix.runner.repair_workspace",
+    side_effect=lambda *_a, **kw: nullcontext(kw.get("workspace") or "/workspace"),
+)
 @patch("integrations.github.tools.security_fix.runner.ensure_cli_ready")
 @patch(
     "integrations.github.tools.security_fix.runner.gather_security_alert_context",
@@ -786,21 +798,20 @@ def test_tool_passes_repl_confirmation_function() -> None:
     ) as runner:
         result = fix_github_security_alert(context=agent_context)
 
-    assert result == {"success": True}
+    assert result["success"] is True
+    assert result["work_outcome"]["status"] == "succeeded"
     assert runner.call_args.kwargs["confirm_fn"] is confirm
 
 
 def test_registry_discovers_security_fix_on_action_surface() -> None:
     clear_tool_registry_cache()
     action = get_registered_tool_map("action")
-    investigation = get_registered_tool_map("investigation")
     chat = get_registered_tool_map("chat")
 
     tool = action["fix_github_security_alert"]
     assert tool.surfaces == ("action",)
     assert tool.requires_approval is True
     assert tool.side_effect_level == "mutating"
-    assert "fix_github_security_alert" not in investigation
     assert "fix_github_security_alert" not in chat
 
 
@@ -810,5 +821,5 @@ def test_skill_guidance_attaches_to_security_fix_tool() -> None:
     tool = tools_by_name["fix_github_security_alert"]
 
     assert "Workflow guidance:" in tool.description
-    assert '<skill name="github-security-fix"' in tool.skill_guidance
+    assert '<tool_guidance name="operating-github-security-fixer"' in tool.skill_guidance
     assert "Secret-scanning alerts are refused" in tool.skill_guidance

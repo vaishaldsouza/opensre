@@ -9,6 +9,7 @@ from core.domain.types.tools import ToolSurface
 from core.domain.work_items import (
     WORK_ITEM_PRIORITIES,
     WORK_ITEM_STATUSES,
+    AmbiguousWorkItemDatetimeError,
     WorkItemChannelTarget,
     WorkItemPriority,
     WorkItemUpdates,
@@ -17,13 +18,14 @@ from core.domain.work_items import (
     list_work_items,
     make_work_item,
     prioritize_work_items,
+    resolve_work_item_datetime,
     resolve_work_item_selector,
     update_work_item,
     work_items_path,
 )
 from core.tool import AgentToolContext, SideEffectLevel
 from core.tool_framework import tool
-from infrastructure.scheduling.scheduler.store import add_task as add_scheduled_task
+from infrastructure.scheduling.scheduler.storage import add_task as add_scheduled_task
 from infrastructure.scheduling.scheduler.types import Provider, ScheduledTask, TaskKind
 from tools.system.work_items._evidence import map_work_task_list, map_work_task_prioritize
 from tools.system.work_items.delivery import delivery_targets, invalid_delivery_targets
@@ -73,9 +75,8 @@ def _work_items_available(_sources: dict[str, dict[str, Any]]) -> bool:
         "User asks to create a GitHub issue rather than a local work item",
     ],
     tags=("safe", "fast", "no-credentials"),
-    surfaces=(ToolSurface.ACTION, ToolSurface.INVESTIGATION),
+    surfaces=(ToolSurface.ACTION,),
     side_effect_level=SideEffectLevel.MUTATING,
-    parallel_safe=False,
     accepts_runtime_context=True,
     is_available=_work_items_available,
     input_schema={
@@ -169,6 +170,23 @@ def work_task_add(
                 "a gateway chat with an active channel"
             ),
         }
+    if remind_at:
+        try:
+            if resolve_work_item_datetime(remind_at, timezone.strip() or "UTC") is None:
+                return {
+                    "error": "invalid_remind_at",
+                    "detail": "remind_at does not exist in the specified timezone",
+                }
+        except AmbiguousWorkItemDatetimeError:
+            return {
+                "error": "invalid_remind_at",
+                "detail": "remind_at is ambiguous in the specified timezone; include an explicit UTC offset",
+            }
+        except ValueError:
+            return {
+                "error": "invalid_timezone",
+                "detail": "timezone must be a valid IANA timezone",
+            }
     item = add_work_item(
         title=title,
         priority=parsed_priority,
@@ -199,7 +217,7 @@ def work_task_add(
         "hackathon task overview, completed tasks, blocked tasks, or project-specific todos."
     ),
     tags=("safe", "fast", "no-credentials"),
-    surfaces=(ToolSurface.ACTION, ToolSurface.INVESTIGATION),
+    surfaces=(ToolSurface.ACTION,),
     side_effect_level=SideEffectLevel.READ_ONLY,
     is_available=_work_items_available,
     input_schema={
@@ -246,9 +264,8 @@ def work_task_list(
         "Use when the user says a task is done or asks to mark tasks Y and Z completed."
     ),
     tags=("safe", "fast", "no-credentials"),
-    surfaces=(ToolSurface.ACTION, ToolSurface.INVESTIGATION),
+    surfaces=(ToolSurface.ACTION,),
     side_effect_level=SideEffectLevel.MUTATING,
-    parallel_safe=False,
     is_available=_work_items_available,
     input_schema={
         "type": "object",
@@ -282,9 +299,8 @@ def work_task_complete(selectors: list[str]) -> dict[str, Any]:
         "notes, or reminder channel."
     ),
     tags=("safe", "fast", "no-credentials"),
-    surfaces=(ToolSurface.ACTION, ToolSurface.INVESTIGATION),
+    surfaces=(ToolSurface.ACTION,),
     side_effect_level=SideEffectLevel.MUTATING,
-    parallel_safe=False,
     accepts_runtime_context=True,
     is_available=_work_items_available,
     input_schema={
@@ -361,6 +377,23 @@ def work_task_update(
         error = validate_datetime_arg(value, field=field_name)
         if error is not None:
             return error
+    if remind_at:
+        try:
+            if resolve_work_item_datetime(remind_at, timezone.strip() or "UTC") is None:
+                return {
+                    "error": "invalid_remind_at",
+                    "detail": "remind_at does not exist in the specified timezone",
+                }
+        except AmbiguousWorkItemDatetimeError:
+            return {
+                "error": "invalid_remind_at",
+                "detail": "remind_at is ambiguous in the specified timezone; include an explicit UTC offset",
+            }
+        except ValueError:
+            return {
+                "error": "invalid_timezone",
+                "detail": "timezone must be a valid IANA timezone",
+            }
     explicit_targets = delivery_targets(
         provider=channel_provider,
         chat_id=channel_id,
@@ -430,7 +463,7 @@ def work_task_update(
         "and 'which of these tasks should I pick up?'. Use the returned reasons in the final answer."
     ),
     tags=("safe", "fast", "no-credentials"),
-    surfaces=(ToolSurface.ACTION, ToolSurface.INVESTIGATION),
+    surfaces=(ToolSurface.ACTION,),
     side_effect_level=SideEffectLevel.READ_ONLY,
     is_available=_work_items_available,
     input_schema={
@@ -484,9 +517,8 @@ def work_task_prioritize(
         "User asks for proactive reminders in Slack or Telegram on a recurring cadence",
     ],
     tags=("safe", "no-credentials"),
-    surfaces=(ToolSurface.ACTION, ToolSurface.INVESTIGATION),
+    surfaces=(ToolSurface.ACTION,),
     side_effect_level=SideEffectLevel.MUTATING,
-    parallel_safe=False,
     accepts_runtime_context=True,
     is_available=_work_items_available,
     input_schema={

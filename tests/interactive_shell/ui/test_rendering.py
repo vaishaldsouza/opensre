@@ -15,6 +15,7 @@ from surfaces.interactive_shell.ui.streaming.console import StreamingConsole
 from surfaces.shared.terminal.components.rendering import (
     _repl_write_buffer,
     print_repl_json,
+    print_repl_renderable,
     print_repl_text,
     repl_print,
     repl_table,
@@ -94,6 +95,52 @@ def test_print_repl_text_uses_crlf_so_goal_checklists_do_not_staircase(
     assert "\r\n    [ ] 1. Identify" in joined
     assert "\r\n  → [ ] 2. Run" in joined
     # No bare LF left (would staircase under raw patch_stdout).
+    assert "\n" not in joined.replace("\r\n", "")
+
+
+def test_print_repl_renderable_keeps_truecolor_and_crlf(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Group
+    from rich.style import Style
+    from rich.text import Text
+
+    class _FakeStdout:
+        def __init__(self) -> None:
+            self.writes: list[str] = []
+
+        def write(self, text: str) -> int:
+            self.writes.append(text)
+            return len(text)
+
+        def flush(self) -> None:
+            return None
+
+        def isatty(self) -> bool:
+            return True
+
+    fake = _FakeStdout()
+    monkeypatch.setattr("surfaces.shared.terminal.components.rendering.sys.stdout", fake)
+    # ``no_color=False`` pins the decision Rich would otherwise take from the
+    # developer's ``NO_COLOR`` env; the buffered path must inherit it.
+    console = Console(
+        file=fake,
+        force_terminal=True,
+        highlight=False,
+        color_system="truecolor",
+        no_color=False,
+    )
+    monkeypatch.setattr(console, "file", fake)
+
+    # Rich memoizes a style's ANSI codes at its first render and shares Style
+    # instances process-wide through the ``Style.parse`` and ``Style._add``
+    # lru caches. Another test on this xdist worker that already rendered this
+    # hex through a 256-colour console would otherwise fix it at ``38;5;…``
+    # here no matter what the buffered path does, so start from cold caches.
+    Style.parse.cache_clear()
+    Style._add.cache_clear()
+    print_repl_renderable(console, Group(Text("Plan complete"), Text("  ✓ step", style="#6E6E6E")))
+
+    joined = "".join(fake.writes)
+    assert "38;2;110;110;110" in joined
     assert "\n" not in joined.replace("\r\n", "")
 
 
@@ -296,9 +343,9 @@ def test_repl_render_launch_poster_uses_crlf_on_tty(monkeypatch: pytest.MonkeyPa
     assert "blue" in written
     assert f"38;2;{_rgb(THEME_REGISTRY['blue'].HIGHLIGHT)}" in written
     assert _rgb(THEME_REGISTRY["green"].HIGHLIGHT) not in written
-    assert "opensre" in written
+    # Canonical braille "loops" mark — do not assert a box-drawing wordmark.
+    assert "⣿⣿⠀⠀⣿⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⠀⢸⣿⣿" in written
     assert "Skills" in written
-    assert "Welcome" not in written
     assert "\r\n" in written
     # REPL path must not emit bare \\n (causes double-spaced output under patch_stdout).
     assert "\r" not in written.replace("\r\n", "")

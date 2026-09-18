@@ -5,7 +5,7 @@ Alpha mode: allow everything
 OpenSRE is in **alpha**, and the interactive REPL runs with **no command
 guardrails** so developer velocity stays high. Every policy decision below
 resolves to ``allow`` and nothing prompts for confirmation: slash/``opensre``
-commands (any tier), investigations, synthetic tests, code-agent launches, LLM
+commands (any tier), synthetic tests, code-agent launches, LLM
 runtime switches, and shell commands of every kind — read-only, mutating,
 ``restricted`` (``sudo``, ``systemctl``, ``kill``, ``dd`` …), shell operators
 (``| && ; > <``), and command substitution (`` ` ``/``$(...)``) — all run
@@ -163,10 +163,6 @@ def apply_auto_level(
     """
     if result.verdict != "allow":
         return result
-    # Read-only shell commands (ls, find, grep, …) run without approval at every
-    # level: they only inspect state, so gating them is friction without safety.
-    if result.shell_classification == "read_only":
-        return result
     ask_types = AUTO_LEVEL_ASK_TOOL_TYPES[auto_level]
     if ask_types is not None and result.tool_type not in ask_types:
         return result
@@ -195,10 +191,6 @@ def apply_plan_only_gate(
     """
     if not plan_only_active or result.verdict != "allow":
         return result
-    # Read-only shell commands only inspect state; a plan-only request does not
-    # gate them any more than /auto does.
-    if result.shell_classification == "read_only":
-        return result
     if not is_mutating_tool_type(result.tool_type):
         return result
     return replace(
@@ -212,7 +204,7 @@ def allow_tool(tool_type: str) -> ExecutionPolicyResult:
     """Default-allow verdict for a tool launch.
 
     Under alpha the policy never denies a tool launch (slash commands,
-    investigations, synthetic tests, code-agent launches, LLM runtime switches),
+    synthetic tests, code-agent launches, LLM runtime switches),
     so every caller resolves to ``allow``. ``tool_type`` is carried through for
     analytics and confirmation UX.
     """

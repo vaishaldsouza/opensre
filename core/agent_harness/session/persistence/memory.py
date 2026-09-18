@@ -8,8 +8,6 @@ from typing import Any
 
 from core.agent_harness.session.persistence.contracts import SessionPersistenceSource
 
-_TRIGGER_MAX_CHARS = 200
-
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -190,39 +188,17 @@ class InMemorySessionStore:
             },
         )
 
-    def append_investigation_result(
-        self,
-        session_id: str,
-        state: dict[str, Any],
-        *,
-        trigger: str = "",
-    ) -> str:
-        investigation_id = uuid.uuid4().hex[:8]
-        report = state.get("problem_md") or state.get("slack_message") or state.get("report") or ""
-        self._append(
-            session_id,
-            "investigation_result",
-            {
-                "investigation_id": investigation_id,
-                "completed_at": _now(),
-                "trigger": trigger.strip()[:_TRIGGER_MAX_CHARS],
-                "root_cause": str(state.get("root_cause") or ""),
-                "report": str(report),
-                "root_cause_category": str(state.get("root_cause_category") or ""),
-                "alert_name": str(state.get("alert_name") or ""),
-                "run_id": str(state.get("run_id") or ""),
-            },
-        )
-        return investigation_id
-
     def flush(self, session: SessionPersistenceSource) -> None:
         records = self._files.get(session.session_id)
         if not records:
             return
         trailing_leaf = records[-1].get("type") == "leaf"
         if not trailing_leaf and not any(rec.get("type") != "session" for rec in records):
-            del self._files[session.session_id]
-            return
+            from core.agent_harness.session.pending_choice import PendingUserChoice
+
+            if not isinstance(getattr(session, "pending_user_choice", None), PendingUserChoice):
+                del self._files[session.session_id]
+                return
         # A trailing ``leaf`` means a prior flush already closed the tip. Still
         # allow live state (session goals) to append past that marker so
         # mid-session ``/goal pause`` survives the next gateway ``resolve``;
@@ -272,6 +248,25 @@ class InMemorySessionStore:
                     {
                         "custom_type": TASK_PLAN_STATE_CUSTOM_TYPE,
                         "content": plan_state or {},
+                        "display": False,
+                    },
+                )
+                records = self._files.get(session.session_id, records)
+        if hasattr(session, "pending_user_choice"):
+            from core.agent_harness.session.pending_choice import (
+                PENDING_USER_CHOICE_STATE_CUSTOM_TYPE,
+                pending_user_choice_state_snapshot,
+                should_persist_pending_user_choice_state,
+            )
+
+            choice_state = pending_user_choice_state_snapshot(session)
+            if should_persist_pending_user_choice_state(choice_state, prior_records=records):
+                self._append(
+                    session.session_id,
+                    "custom_message",
+                    {
+                        "custom_type": PENDING_USER_CHOICE_STATE_CUSTOM_TYPE,
+                        "content": choice_state or {},
                         "display": False,
                     },
                 )

@@ -111,8 +111,8 @@ fix_sentry_issue_start_tool = RegisteredTool(
         "request for a Sentry issue and provides a Sentry issue URL — e.g. 'fix this sentry "
         "issue <url>' or 'fix <url> and open a PR'. Set open_pr=true when they ask to "
         "open/create/raise a PR or to ship the fix; otherwise false to only produce a diff. "
-        "Do NOT use for investigate/RCA/diagnose/analyze requests (use investigation_start), "
-        "for non-Sentry URLs, or when no Sentry issue URL is provided."
+        "Do NOT use for diagnose/analyze-only requests (answer with the read-only "
+        "Sentry tools), for non-Sentry URLs, or when no Sentry issue URL is provided."
     ),
     input_schema=object_schema(
         properties={
@@ -133,7 +133,6 @@ fix_sentry_issue_start_tool = RegisteredTool(
     source="interactive_shell",
     surfaces=(ToolSurface.ACTION,),
     side_effect_level=SideEffectLevel.MUTATING,
-    parallel_safe=False,
     accepts_runtime_context=True,
     is_available=lambda _sources: is_issue_fix_enabled(),
     run=run_sentry_fix,

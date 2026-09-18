@@ -4,24 +4,30 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from core.domain.types.tools import ToolRole
 from core.llm.types import ToolCall
 from core.tool.contracts import AgentTool, AgentToolContext, RuntimeTool
 from infrastructure.observability.errors.boundary import report_exception
+from infrastructure.observability.trace.observations import (
+    ObservationLevel,
+    is_observation_sink_active,
+    observe_tool,
+)
 from infrastructure.observability.trace.redaction import redact_sensitive
 from infrastructure.observability.trace.spans import mark_span_outcome, tool_span
 
 logger = logging.getLogger(__name__)
 _TOOL_LOGGER = logging.getLogger("tools")
 
-_TOOL_EXECUTOR_WORKERS = 10
 _UNSET: object = object()
+_EXECUTED_TOOL_OUTCOMES = frozenset({"ok", "tool_error", "exception"})
 
 
 def availability_view(resolved_integrations: dict[str, Any]) -> dict[str, Any]:
@@ -231,23 +237,49 @@ def execute_tool_calls(
     hooks: ToolExecutionHooks | None = None,
     tool_resources: dict[str, Any] | None = None,
 ) -> list[ToolExecutionResult]:
-    """Execute provider-requested tools and return structured results.
+    """Execute provider-requested tools sequentially and return structured results.
 
-    Arguments are validated before execution. A single sequential tool in the
-    batch forces the whole batch to run sequentially; otherwise calls run in
-    parallel while preserving provider order in the returned list.
+    A response may carry one ``ACTION`` (or one ``TURN_ENDING`` call alone), plus
+    any ``BOOKKEEPING`` calls next to the action. A response that breaks that
+    rule executes nothing: every call gets the same error so the model
+    re-issues a single action. Permitted calls run in provider order.
     """
 
     hooks = hooks or ToolExecutionHooks()
+    tool_map = {t.name: t for t in tools}
+    violation = response_batch_violation(tool_calls, tool_map)
+    if violation is not None:
+        logger.debug("tool_batch rejected calls=%s", [tc.name for tc in tool_calls])
+        for tc in tool_calls:
+            _capture_tool_call_analytics(
+                tc,
+                tool=tool_map.get(tc.name),
+                outcome="batch_rejected",
+                is_error=True,
+                terminate=False,
+                duration_ms=0,
+            )
+        return [
+            _error_result(violation, metadata={"tool_name": tc.name, "batch_rejected": True})
+            for tc in tool_calls
+        ]
     if hooks.before_tool_batch is not None:
         hooks.before_tool_batch(tool_calls)
     tool_sources = availability_view(resolved_integrations)
-    tool_map = {t.name: t for t in tools}
     runtime_resources = dict(tool_resources or {})
 
-    def _call(tc: ToolCall) -> ToolExecutionResult:
-        with tool_span(tc.name, tool_call_id=tc.id) as span_attrs:
-            return _execute_one_tool_call(
+    results: list[ToolExecutionResult] = []
+    for tc in tool_calls:
+        started = time.monotonic()
+        with (
+            observe_tool(
+                tc.name,
+                input=public_tool_input(tc.input) if is_observation_sink_active() else None,
+                metadata={"tool_call_id": tc.id},
+            ) as observation,
+            tool_span(tc.name, tool_call_id=tc.id) as span_attrs,
+        ):
+            result = _execute_one_tool_call(
                 tc,
                 tool_map=tool_map,
                 tool_sources=tool_sources,
@@ -256,36 +288,93 @@ def execute_tool_calls(
                 hooks=hooks,
                 span_attrs=span_attrs,
             )
+            observation.update(
+                output=result.compat_payload(),
+                level=ObservationLevel.ERROR if result.is_error else None,
+                metadata={"is_error": result.is_error, "terminate": result.terminate},
+            )
+            results.append(result)
+        _capture_tool_call_analytics(
+            tc,
+            tool=tool_map.get(tc.name),
+            outcome=str(span_attrs.get("outcome", "unknown")),
+            is_error=result.is_error,
+            terminate=result.terminate,
+            duration_ms=max(0, round((time.monotonic() - started) * 1000)),
+            details=result.details,
+        )
+    return results
 
-    if len(tool_calls) == 1 or _requires_sequential_execution(tool_calls, tool_map):
-        return [_call(tc) for tc in tool_calls]
 
-    results: list[ToolExecutionResult | object] = [_UNSET] * len(tool_calls)
-    submitted: dict[Future[ToolExecutionResult], int] = {}
-    try:
-        with ThreadPoolExecutor(max_workers=min(_TOOL_EXECUTOR_WORKERS, len(tool_calls))) as pool:
-            for i, tc in enumerate(tool_calls):
-                submitted[pool.submit(_call, tc)] = i
-            for fut in as_completed(submitted):
-                try:
-                    results[submitted[fut]] = fut.result()
-                except Exception as fut_exc:  # noqa: BLE001  # lgtm[py/catch-base-exception]
-                    results[submitted[fut]] = _error_result(str(fut_exc))
-    except RuntimeError as exc:
-        logger.warning("[execute_tools] RuntimeError – falling back to sequential: %s", exc)
-        for fut, i in submitted.items():
-            if results[i] is _UNSET and fut.done():
-                try:
-                    results[i] = fut.result()
-                except Exception as fut_exc:  # noqa: BLE001  # lgtm[py/catch-base-exception]
-                    results[i] = _error_result(str(fut_exc))
-        for i, tc in enumerate(tool_calls):
-            if results[i] is _UNSET:
-                results[i] = _call(tc)
-    return [
-        r if isinstance(r, ToolExecutionResult) else _error_result("tool did not run")
-        for r in results
+def _capture_tool_call_analytics(
+    tool_call: ToolCall,
+    *,
+    tool: RuntimeTool | None,
+    outcome: str,
+    is_error: bool,
+    terminate: bool,
+    duration_ms: int,
+    details: Any = None,
+) -> None:
+    """Emit product analytics without retaining tool arguments or results."""
+    from infrastructure.analytics.capture import capture_agent_tool_call_completed
+
+    work = details.get("work_outcome") if isinstance(details, dict) else None
+    status = work.get("status") if isinstance(work, dict) else None
+    # Only categorical status may leave the result; evidence can contain private data.
+    work_status = (
+        status if status in ("noop", "blocked", "failed", "incomplete", "succeeded") else ""
+    )
+    capture_agent_tool_call_completed(
+        tool_call_id=tool_call.id,
+        tool_name=tool_call.name,
+        source=str(getattr(tool, "source", "unknown")),
+        role=tool_role(tool).value,
+        outcome=outcome,
+        executed=outcome in _EXECUTED_TOOL_OUTCOMES,
+        is_error=is_error,
+        terminate=terminate,
+        duration_ms=duration_ms,
+        work_status=work_status,
+    )
+
+
+def tool_role(tool: RuntimeTool | None) -> ToolRole:
+    """Return the declared role; unknown and legacy tools default to action."""
+    if tool is None:
+        return ToolRole.ACTION
+    role = getattr(tool, "role", None)
+    return role if isinstance(role, ToolRole) else ToolRole.ACTION
+
+
+def response_batch_violation(
+    tool_calls: Sequence[ToolCall],
+    tool_map: Mapping[str, RuntimeTool],
+) -> str | None:
+    """Explain why one response's tool calls break the one-action rule, or ``None``."""
+    if len(tool_calls) <= 1:
+        return None
+    roles = [tool_role(tool_map.get(tc.name)) for tc in tool_calls]
+    requested = ", ".join(tc.name for tc in tool_calls)
+    turn_ending = [
+        tc.name for tc, role in zip(tool_calls, roles, strict=True) if role is ToolRole.TURN_ENDING
     ]
+    if turn_ending:
+        return (
+            f"Nothing ran: {turn_ending[0]} hands the turn to the user and must be the only "
+            f"tool call in a response, but this response requested {len(tool_calls)} "
+            f"({requested}). Re-issue {turn_ending[0]} alone, after any other work."
+        )
+    actions = [
+        tc.name for tc, role in zip(tool_calls, roles, strict=True) if role is ToolRole.ACTION
+    ]
+    if len(actions) != 1:
+        return (
+            f"Nothing ran: one action per response, but this response requested "
+            f"{len(actions)} ({', '.join(actions)}). Re-issue exactly one of them; "
+            "bookkeeping calls such as update_plan may accompany it."
+        )
+    return None
 
 
 def execute_tools(
@@ -460,23 +549,6 @@ def _invoke_runtime_tool(
         )
         return tool.run(**kwargs, context=context)
     return tool.run(**kwargs)
-
-
-def _requires_sequential_execution(
-    tool_calls: list[ToolCall],
-    tool_map: dict[str, RuntimeTool],
-) -> bool:
-    for tc in tool_calls:
-        tool = tool_map.get(tc.name)
-        if isinstance(tool, AgentTool) and tool.effective_execution_mode == "sequential":
-            return True
-        if (
-            not isinstance(tool, AgentTool)
-            and tool is not None
-            and not getattr(tool, "parallel_safe", True)
-        ):
-            return True
-    return False
 
 
 def _normalize_result(raw: Any, *, tool_name: str) -> ToolExecutionResult:

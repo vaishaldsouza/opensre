@@ -10,6 +10,7 @@ import pytest
 from prompt_toolkit.completion import Completion
 from rich.console import Console
 
+from core.agent_harness.spi.session_goal import SessionGoal, attach_session_goal
 from infrastructure.scheduling.task_types import TaskKind
 from surfaces.interactive_shell.runtime.core import state as loop_state
 from surfaces.interactive_shell.session import Session
@@ -36,7 +37,7 @@ def _strip_ansi(text: str) -> str:
 
 
 def _placeholder_text(session: Session) -> str:
-    return resolve_prompt_placeholder(session).value
+    return "".join(fragment for _style, fragment in resolve_prompt_placeholder(session))
 
 
 class _RefreshFakeBuffer:
@@ -117,11 +118,13 @@ class TestPromptTurnCounter:
         render_submitted_prompt(console, session, "and again")
         assert _prompt_turn_number(session) == 3
 
-    def test_user_prompt_row_is_recessed_grey_without_accent_bar(self) -> None:
-        """Droid-style: the user row is recessed SECONDARY grey with no bright ``▌``
-        accent bar, so the agent reply (``∴``) and notes carry the visual weight."""
-        from infrastructure.terminal.theme import get_active_theme
+    def test_user_prompt_row_has_warm_accent_on_full_width_surface(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Droid-style: orange ``▌`` lead-in and INPUT_SURFACE across the full row."""
+        from infrastructure.terminal.theme import get_active_theme, reply_marker_hex
 
+        monkeypatch.setattr(prompt_rendering, "terminal_columns", lambda: 40)
         session = Session()
         buf = io.StringIO()
         console = Console(
@@ -134,17 +137,31 @@ class TestPromptTurnCounter:
         )
         render_submitted_prompt(console, session, "why does it show that?")
         raw = buf.getvalue()
-        assert "▌" not in raw  # no bright accent bar
-        visible = re.sub(r"\x1b\[[0-9;]*m", "", raw)
-        assert "[1] ❯ why does it show that?" in visible  # turn number + text kept
-        secondary = get_active_theme().SECONDARY.lstrip("#")
-        r, g, b = (int(secondary[i : i + 2], 16) for i in (0, 2, 4))
-        assert f"{r};{g};{b}" in raw  # body in SECONDARY recessed grey
+        # A blank row precedes the echo (between-turns gap); the plate itself is
+        # the row after it.
+        assert re.sub(r"\x1b\[[0-9;]*m", "", raw).startswith("\n")
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip("\n")
+        assert "▌" in visible
+        assert "❯" not in visible
+        assert "why does it show that?" in visible
+        # Plate spans the live prompt width (spaces pad out the row).
+        assert len(visible) == 40, repr(visible)
+        assert visible.startswith("▌")
+        accent = reply_marker_hex().lstrip("#")
+        ar, ag, ab = (int(accent[i : i + 2], 16) for i in (0, 2, 4))
+        assert f"{ar};{ag};{ab}" in raw
+        surface = get_active_theme().INPUT_SURFACE.lstrip("#")
+        sr, sg, sb = (int(surface[i : i + 2], 16) for i in (0, 2, 4))
+        assert f"{sr};{sg};{sb}" in raw
+        text = get_active_theme().TEXT.lstrip("#")
+        tr, tg, tb = (int(text[i : i + 2], 16) for i in (0, 2, 4))
+        assert f"{tr};{tg};{tb}" in raw
 
     def test_autosubmitted_goal_condition_gets_work_turn_marker(self) -> None:
         """``/goal set`` autosubmit must not look like part of the slash turn."""
         session = Session()
         console = _render_console()
+        attach_session_goal(session, SessionGoal(condition="How many Windows users?"))
         session.terminal.last_input_autosubmitted = True
         render_submitted_prompt(console, session, "How many Windows users in the last 7 days?")
         out = console.file.getvalue()  # type: ignore[union-attr]
@@ -152,6 +169,21 @@ class TestPromptTurnCounter:
         assert "[1]" in out
         assert "How many Windows users" in out
         assert session.terminal.last_input_autosubmitted is False
+
+    def test_autosubmit_without_a_goal_gets_no_work_turn_marker(self) -> None:
+        """A queued picker or demo prompt is autosubmitted too; it is not /goal work."""
+        # Arrange
+        session = Session()
+        console = _render_console()
+        session.terminal.last_input_autosubmitted = True
+
+        # Act
+        render_submitted_prompt(console, session, "/demo")
+
+        # Assert
+        out = console.file.getvalue()  # type: ignore[union-attr]
+        assert "/goal — work turn" not in out
+        assert "/demo" in out
 
     def test_history_rows_do_not_advance_counter(self) -> None:
         """One request that runs many tools adds many history rows but one number.
@@ -178,31 +210,23 @@ class TestPromptTurnCounter:
 
 
 class TestResolveIdleHint:
-    def test_idle_hint_shows_ready_and_commands(self) -> None:
+    def test_idle_hint_is_empty_no_recurring_ready_line(self) -> None:
+        # The prompt shows no per-turn "Ready · …" line (it also stacked into
+        # copies on terminal resize).
         session = Session()
         session.configured_integrations_known = True
         session.configured_integrations = ("datadog", "github", "grafana")
-        rendered = _strip_ansi(resolve_idle_hint_ansi(session))
-        assert "Ready" in rendered
-        assert "/ for commands" in rendered
+        assert resolve_idle_hint_ansi(session) == ""
 
 
 class TestComposerFooter:
-    def test_places_help_hint_without_terminal_mode_chrome(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(prompt_rendering, "prompt_line_width", lambda: 79)
-        footer = _strip_ansi(composer_footer_ansi())
-        assert footer.startswith("Enter send · Shift+Enter newline · ? help")
-        assert "TERMINAL" not in footer
-        assert "■" not in footer
-
-    def test_narrow_footer_keeps_only_a_clipped_help_hint(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(prompt_rendering, "prompt_line_width", lambda: 6)
-        footer = _strip_ansi(composer_footer_ansi())
-        assert footer == "Enter…"
+    def test_footer_row_is_empty_box_is_the_job_prompt(self) -> None:
+        assert composer_footer_ansi() == ""
+        session = Session()
+        text = _placeholder_text(session)
+        assert text == DEFAULT_PLACEHOLDER_TEXT
+        assert "Enter send" not in text
+        assert "? help" not in text
 
 
 class TestPromptMessage:
@@ -213,7 +237,9 @@ class TestPromptMessage:
 class TestResolvePromptPlaceholder:
     def test_default_when_no_session_context(self) -> None:
         session = Session()
-        assert _strip_ansi(_placeholder_text(session)) == "see what you can do"
+        text = _placeholder_text(session)
+        assert text == "Ask about an alert"
+        assert "Enter send" not in text
 
     def test_placeholder_prompts_to_continue_an_unfinished_plan(self) -> None:
         from core.agent_harness.task_plan.plan import parse_task_plan
@@ -243,11 +269,11 @@ class TestResolvePromptPlaceholder:
 
     def test_shows_running_task_count(self) -> None:
         session = Session()
-        task = session.task_registry.create(TaskKind.SYNTHETIC_TEST)
+        task = session.task_registry.create(TaskKind.CLI_COMMAND)
         task.mark_running()
         assert "1 task running" in _placeholder_text(session)
 
-        second = session.task_registry.create(TaskKind.INVESTIGATION)
+        second = session.task_registry.create(TaskKind.CODE_AGENT)
         second.mark_running()
         assert "2 tasks running" in _placeholder_text(session)
 
@@ -261,7 +287,7 @@ class TestResolvePromptPlaceholder:
         session = Session()
         session.terminal.trust_mode = True
         session.resumed_from_name = "redis-incident"
-        task = session.task_registry.create(TaskKind.WATCHDOG)
+        task = session.task_registry.create(TaskKind.CLI_COMMAND)
         task.mark_running()
         text = _placeholder_text(session)
         assert "trust on" in text
@@ -303,10 +329,10 @@ class TestCompletionPreviewHint:
 
     def test_shows_full_slash_command_description(self, monkeypatch: pytest.MonkeyPatch) -> None:
         completion = Completion(
-            "/investigate",
+            "/gateway",
             start_position=-1,
-            display="/investigate",
-            display_meta="Run an RCA investigation from a file or sample templa…",
+            display="/gateway",
+            display_meta="Control the background OpenSRE gateway daemon: start…",
         )
         app = _FakeApp(
             current_buffer=_FakeBuffer(
@@ -321,8 +347,8 @@ class TestCompletionPreviewHint:
         monkeypatch.setattr(prompt_completion, "get_app_or_none", lambda: app)
 
         rendered = _strip_ansi(completion_preview_hint_ansi())
-        assert rendered.startswith("/investigate — ")
-        assert len(rendered) > len("/investigate — " + completion.display_meta_text)
+        assert rendered.startswith("/gateway — ")
+        assert len(rendered) > len("/gateway — " + completion.display_meta_text)
         assert "…" not in rendered
 
     def test_unregistered_slash_completion_uses_display_label(
@@ -461,15 +487,14 @@ class TestResolvePromptPrefix:
         assert prefix == "preview line"
         assert "/ for commands" not in prefix
 
-    def test_falls_back_to_idle_hint_when_no_preview(self) -> None:
+    def test_idle_prompt_prefix_is_empty_when_no_preview(self) -> None:
         spinner = loop_state.SpinnerState()
         prefix = resolve_prompt_prefix_ansi(
             inline_spinner=spinner.inline_spinner_ansi(),
             idle_hint=resolve_idle_hint_ansi(Session()),
         )
-        rendered = _strip_ansi(prefix)
-        assert "Ready" in rendered
-        assert "/ for commands" in rendered
+        # Nothing streaming or previewing → no idle chrome above the composer.
+        assert _strip_ansi(prefix) == ""
 
 
 @pytest.mark.asyncio
@@ -500,3 +525,20 @@ async def test_composer_frame_preferred_height_does_not_crash() -> None:
         await asyncio.wait_for(task, timeout=5.0)
 
     assert dim.preferred >= 1
+
+
+def test_composer_frame_uses_subtle_rounded_corners() -> None:
+    from prompt_toolkit.layout.containers import VSplit, Window
+
+    from surfaces.interactive_shell.ui.input_prompt import rounded_composer_frame
+
+    frame = rounded_composer_frame(Window())
+    top, _middle, bottom = frame.children
+
+    assert isinstance(top, VSplit)
+    assert isinstance(bottom, VSplit)
+    assert [corner.char for corner in (top.children[0], top.children[-1])] == ["╭", "╮"]
+    assert [corner.char for corner in (bottom.children[0], bottom.children[-1])] == [
+        "╰",
+        "╯",
+    ]

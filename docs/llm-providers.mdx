@@ -3,9 +3,9 @@ title: "LLM Providers"
 description: "Supported LLM APIs and CLIs, environment variables, and how to switch between them."
 ---
 
-OpenSRE works with many model providers. You choose which one with
-`LLM_PROVIDER`. Hosted providers use an API key stored in
-`~/.opensre/credentials.json` (or the process environment).
+The interactive shell uses the model supplied by the signed-in OpenSRE account. That account route takes precedence for reasoning, classification, and tool calls; `/model` shows it but does not replace it locally.
+
+Other hosts and account-independent CLI workflows can use the providers below. Choose one with `LLM_PROVIDER`; hosted providers use an API key stored in `~/.opensre/credentials.json` or the process environment.
 
 Default model IDs are defined in
 [`config/llm_models.py`](https://github.com/Tracer-Cloud/opensre/blob/main/config/llm_models.py).
@@ -82,14 +82,12 @@ opensre onboard
 
 Onboarding always collects an API key for hosted providers.
 
-In the interactive shell, `/model` lists common models. Some providers also
-accept custom model IDs (OpenAI, OpenRouter, TrustedRouter, Gemini, NVIDIA,
-Bedrock, local CLIs, Ollama, and DeepSeek):
+Local provider configuration supports custom model IDs for OpenAI, OpenRouter, TrustedRouter, Gemini, NVIDIA, Bedrock, local CLIs, Ollama, and DeepSeek. These settings do not override a signed-in account route:
 
 ```bash
-/model set openai gpt-5.6-sol
-/model set openai gpt-5.6-terra --toolcall-model gpt-5.6-luna
-/model set openai gpt-5.5 --toolcall-model gpt-5.4-mini
+export LLM_PROVIDER=openai
+export OPENAI_REASONING_MODEL=gpt-5.6-sol
+export OPENAI_TOOLCALL_MODEL=gpt-5.6-luna
 ```
 
 GPT-5.6 has three tiers: `gpt-5.6-sol` (flagship), `gpt-5.6-terra` (balanced),
@@ -123,7 +121,7 @@ CLI providers (`codex`, `claude-code`, `copilot`, `pi`, `cursor`, `opencode`,
 ### Providers supported via LiteLLM
 
 When `OPENSRE_LLM_TRANSPORT=litellm` (or `LLM_PROVIDER=azure-openai`), OpenSRE
-builds the same investigation tool schemas as the SDK path and passes them to
+builds the same tool schemas as the SDK path and passes them to
 `litellm.completion(..., tools=..., tool_choice="auto")`. LiteLLM routes the
 request; OpenSRE still handles schema cleanup, retries, and message replay.
 
@@ -176,13 +174,13 @@ the credentials file directly, status may look stale until you run
 `opensre auth verify <provider>` or make a request. Verification marks the
 provider `stale` when the secret is gone.
 
-In the interactive shell:
+For account-independent CLI workflows:
 
 ```bash
-/login openai
-/login anthropic
-/login deepseek
-/auth status
+opensre auth login openai
+opensre auth login anthropic
+opensre auth login deepseek
+opensre auth status
 ```
 
 ## API providers
@@ -295,7 +293,7 @@ export CUSTOM_ANTHROPIC_MODEL=claude-opus-4-7
 ```
 
 Both require the base URL and a model — onboarding and startup fail if either is
-missing, rather than reaching a wrong endpoint mid-investigation.
+missing, rather than reaching a wrong endpoint mid-run.
 
 - **The base URL is used verbatim.** Include the API path yourself (for example
   `/v1` for OpenAI-compatible gateways). OpenSRE never appends a path.
@@ -536,7 +534,7 @@ binary on `PATH` (or via an explicit env var) and reuses the existing session.
 CLI providers authenticate with the vendor’s own login command. OpenSRE does
 not start that login.
 
-**Investigation timeouts:** Each ReAct turn runs one full CLI subprocess with
+**Turn timeouts:** Each ReAct turn runs one full CLI subprocess with
 the system prompt, tool schemas, and conversation history. The default budget is
 **300 seconds** (Python adds a small buffer). Override per provider when needed,
 for example `GEMINI_CLI_TIMEOUT_SECONDS`, `CLAUDE_CODE_TIMEOUT_SECONDS`, or
@@ -863,8 +861,6 @@ updating env vars. A new process picks up the new `LLM_PROVIDER` automatically.
   [`core/llm/client_builders.py`](https://github.com/Tracer-Cloud/opensre/blob/main/core/llm/client_builders.py)
 - LiteLLM routing (when enabled):
   [`core/llm/transports/litellm/routing.py`](https://github.com/Tracer-Cloud/opensre/blob/main/core/llm/transports/litellm/routing.py)
-- Investigation tool-calling adapters:
-  [Investigation tool calling](/investigation-tool-calling)
 - API provider guide:
   [`core/llm/AGENTS.md`](https://github.com/Tracer-Cloud/opensre/blob/main/core/llm/AGENTS.md)
 - CLI provider guide:

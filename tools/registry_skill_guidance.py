@@ -25,13 +25,19 @@ def _skill_guidance_files() -> tuple[Path, ...]:
 
     explicit = (
         REPO_ROOT / "integrations" / "github" / "tools" / "workflow" / "SKILL.md",
-        REPO_ROOT / "integrations" / "sentry" / "tools" / "skills" / "sentry-summary" / "SKILL.md",
+        REPO_ROOT
+        / "integrations"
+        / "sentry"
+        / "tools"
+        / "skills"
+        / "summarizing-sentry-issues"
+        / "SKILL.md",
         REPO_ROOT
         / "integrations"
         / "posthog"
         / "tools"
         / "skills"
-        / "posthog-summary"
+        / "summarizing-posthog-analytics"
         / "SKILL.md",
         REPO_ROOT / "integrations" / "github" / "tools" / "github_cli" / "SKILL.md",
         REPO_ROOT / "integrations" / "github" / "tools" / "ci_fix" / "SKILL.md",
@@ -42,6 +48,16 @@ def _skill_guidance_files() -> tuple[Path, ...]:
         (REPO_ROOT / "tools" / "system" / "python_execution_tool" / "skills").glob("*/SKILL.md")
     )
     return (*explicit, *discovered)
+
+
+def tool_guidance_tools(name: str) -> tuple[str, ...]:
+    """Tools whose descriptions carry the guidance called *name*; empty when none does."""
+    wanted = name.strip().casefold()
+    for skill_path in _skill_guidance_files():
+        skill = load_tool_skill_guidance(skill_path).skill
+        if skill is not None and skill.name.casefold() == wanted:
+            return skill.tool_names
+    return ()
 
 
 def _truncate_skill_guidance(text: str) -> str:

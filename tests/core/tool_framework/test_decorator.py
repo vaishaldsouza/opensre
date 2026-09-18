@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from core.domain.types.tools import ToolRole
 from core.tool.contracts import REGISTERED_TOOL_ATTR, BaseTool, RegisteredTool
 from core.tool_framework.tool_decorator import tool
 
@@ -82,7 +83,7 @@ def test_tool_used_as_factory_produces_same_result() -> None:
     assert registered.name == "factory_tool"
 
 
-def test_function_tool_surfaces_defaults_to_investigation() -> None:
+def test_function_tool_surfaces_defaults_to_chat() -> None:
     @tool(
         name="default_surface_tool",
         description="Check surface default.",
@@ -93,7 +94,7 @@ def test_function_tool_surfaces_defaults_to_investigation() -> None:
         pass
 
     registered = getattr(fn, REGISTERED_TOOL_ATTR)
-    assert registered.surfaces == ("investigation",)
+    assert registered.surfaces == ("chat",)
 
 
 def test_function_tool_surfaces_are_propagated() -> None:
@@ -102,13 +103,13 @@ def test_function_tool_surfaces_are_propagated() -> None:
         description="Appears in two surfaces.",
         source="grafana",
         input_schema={"type": "object", "properties": {}},
-        surfaces=("investigation", "chat"),
+        surfaces=("action", "chat"),
     )
     def fn() -> None:
         pass
 
     registered = getattr(fn, REGISTERED_TOOL_ATTR)
-    assert set(registered.surfaces) == {"investigation", "chat"}
+    assert set(registered.surfaces) == {"action", "chat"}
 
 
 def test_function_tool_with_source_none_raises() -> None:
@@ -150,11 +151,11 @@ def test_tool_attaches_registered_tool_when_requires_approval_overridden() -> No
     assert registered.approval_reason == "needs review"
 
 
-def test_tool_attaches_registered_tool_when_parallel_safe_overridden() -> None:
+def test_tool_attaches_registered_tool_when_role_overridden() -> None:
     instance = _ABaseTool()
-    tool(instance, parallel_safe=False)
+    tool(instance, role=ToolRole.BOOKKEEPING)
     registered = getattr(instance, REGISTERED_TOOL_ATTR)
-    assert registered.parallel_safe is False
+    assert registered.role is ToolRole.BOOKKEEPING
 
 
 def test_tool_attaches_evidence_mapper_to_base_tool() -> None:

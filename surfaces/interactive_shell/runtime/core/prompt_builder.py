@@ -9,7 +9,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.formatted_text import ANSI, FormattedText
 from rich.console import Console
 
 from surfaces.interactive_shell.runtime.core.state import (
@@ -31,10 +31,13 @@ from surfaces.interactive_shell.ui.input_prompt.key_bindings import (
     install_session_key_bindings,
 )
 from surfaces.interactive_shell.ui.input_prompt.refresh import wire_prompt_refresh
+from surfaces.interactive_shell.ui.input_prompt.resize import install_shrink_resize_guard
 from surfaces.interactive_shell.ui.input_prompt.style import refresh_prompt_theme
 from surfaces.interactive_shell.ui.prompt_visibility import typing_box_hidden
 from surfaces.interactive_shell.ui.terminal_ui import render_prompt_region
+from surfaces.shared.terminal.banner import render_launch_banner
 from surfaces.shared.terminal.components.cpr_stdin import drain_stale_cpr_bytes
+from surfaces.shared.terminal.components.rendering import repl_clear_screen
 
 # Brief pause so a CPR reply still in flight lands in the stdin buffer before the
 # non-blocking drain runs; without it the reply leaks into this prompt as literal bytes.
@@ -82,6 +85,7 @@ class PromptBuilder:
         install_session_key_bindings(self.pt_session, cancel_kb)
 
         self.pt_app = self.pt_session.app
+        install_shrink_resize_guard(self.pt_app, rerender_banner=self._rerender_banner_if_idle)
         self.pt_session.default_buffer.accept_handler = self._accept_prompt_buffer
         # While the Yes/No gate owns the keyboard the composer is hidden but its
         # buffer still receives unbound keys unless it is read-only. Lock it so
@@ -111,6 +115,30 @@ class PromptBuilder:
             self._expand_collapsed_output,
         )
         install_session_key_bindings(self.pt_session, output_kb)
+
+    def _rerender_banner_if_idle(self) -> bool:
+        """Clear the viewport and reprint the launch banner at the new width; True when done.
+
+        The banner is static scrollback laid out for the width it was printed
+        at; a resize reflows it into sliced / wrapped garbage. While nothing
+        has been submitted the screen holds only the banner and the prompt, so
+        it is safe to clear and redraw both. Once a turn exists the banner sits
+        in scrollback above the conversation and is left alone.
+
+        No startup spin here — SIGWINCH must stay instant.
+        """
+        if self.session.terminal.submitted_turn_count > 0 or self.pt_app is None:
+            return False
+        repl_clear_screen()
+        drain_stale_cpr_bytes()
+        console = Console(
+            highlight=False,
+            force_terminal=True,
+            color_system="truecolor",
+            legacy_windows=False,
+        )
+        render_launch_banner(console, session=self.session, animate=False)
+        return True
 
     def _expand_collapsed_output(self, text: str) -> None:
         """Suspend the prompt and expand the next folded tool result (Ctrl+O).
@@ -221,7 +249,9 @@ class PromptBuilder:
         if prefilled and self.session.terminal.pop_pending_autosubmit():
             # Same paint path as Enter: mark so ``render_submitted_prompt`` can
             # label ``/goal`` work turns distinctly from the ``/goal set`` slash.
-            self.session.terminal.last_input_autosubmitted = True
+            # A plain auto prompt is submitted exactly as typed input instead.
+            plain = self.session.terminal.pop_pending_plain_turn()
+            self.session.terminal.last_input_autosubmitted = not plain
             return prefilled
 
         if prefilled:
@@ -245,11 +275,14 @@ class PromptBuilder:
             await asyncio.gather(submitted, return_exceptions=True)
             raise
 
-    def _prompt_placeholder(self) -> ANSI:
+    def _prompt_placeholder(self) -> FormattedText:
         # Options menus / confirmation own the keyboard — suppress free-text ghost.
         if typing_box_hidden(self.session, self.state):
-            return ANSI("")
+            return FormattedText()
         return prompt_rendering.resolve_prompt_placeholder(self.session)
 
     def render_submitted_prompt(self, console: Console, text: str) -> None:
+        # The between-turns blank row is placed inside ``render_submitted_prompt``
+        # itself: the handoff-answer marker must hug the reply it answers, so the
+        # gap falls after the marker rather than blanket-above the whole turn.
         prompt_rendering.render_submitted_prompt(console, self.session, text)

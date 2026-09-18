@@ -27,36 +27,37 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
 
 
-def test_render_note_block_is_dim_and_indented_but_keeps_bold() -> None:
-    # A working note reads as dim + indented (no glyph), distinct from the bright
-    # reply, while the bold action word stays bold within the dim base.
+def test_render_note_block_is_recessed_and_indented_but_keeps_bold() -> None:
+    # A visible working-state label leads the recessed body; action words stay bold.
     from infrastructure.terminal import theme as ui_theme
 
+    ui_theme.set_active_theme("amber")
     buf = io.StringIO()
     console = Console(
-        file=buf, force_terminal=True, color_system="truecolor", width=80, highlight=False
+        file=buf,
+        force_terminal=True,
+        color_system="truecolor",
+        legacy_windows=False,
+        no_color=False,
+        width=80,
+        highlight=False,
     )
 
     render_note_block(console, "I'll **load** the workflow.")
 
     raw = buf.getvalue()
-    dim = str(ui_theme.DIM)  # e.g. "#6E6E6E"
-    r, g, b = (int(dim[i : i + 2], 16) for i in (1, 3, 5))
-    # DIM may render as 8-colour (``90m``) or truecolor (``38;2;r;g;b``) depending
-    # on the color system the runner advertises — accept either so the test does
-    # not hinge on terminal capability.
-    assert f"38;2;{r};{g};{b}" in raw or "\x1b[90m" in raw  # dim base on the note body
-    assert re.search(r"\x1b\[[0-9;]*1[;m]", raw)  # bold action word survives the dim base
+    # Soft recessed base (SECONDARY), not ghost DIM — accept truecolor or 256.
+    assert "38;2;" in raw or "38;5;" in raw
+    assert re.search(r"\x1b\[[0-9;]*1[;m]", raw)  # bold action word survives
     first_line = _strip_ansi(raw).splitlines()[0]
-    assert first_line.startswith("   ")  # three-space left indent, no glyph
+    assert first_line.startswith("Working  ")
     assert "load the workflow" in first_line
 
 
 def test_table_reply_renders_as_a_table_not_flattened_pipes() -> None:
     # A reply that leads with a Markdown table must render as an aligned table. The
-    # inline ``∴ `` marker fused onto the header row breaks CommonMark block parsing
-    # and flattens the table to one line of raw pipes, so the marker goes on its own
-    # line before a leading block.
+    # transcript label stays in its own column so it cannot become part of the
+    # CommonMark source and flatten the table to a line of raw pipes.
     buf = io.StringIO()
     console = Console(file=buf, force_terminal=False, width=60, highlight=False)
 
@@ -67,17 +68,17 @@ def test_table_reply_renders_as_a_table_not_flattened_pipes() -> None:
     out = buf.getvalue()
     assert "| Rank | Folder |" not in out  # not the raw flattened markdown row
     assert "Rank" in out and "Folder" in out and "Size" in out
-    assert "─" in out  # rendered as a table with a header rule
+    assert "━" in out and "│" in out  # rendered as a table with header rule and column rules
 
 
-def test_prose_reply_keeps_the_inline_marker() -> None:
-    # Prose still carries the marker inline on the first line.
+def test_prose_reply_keeps_the_inline_label() -> None:
+    # Prose carries the assistant label inline on the first line.
     buf = io.StringIO()
     console = Console(file=buf, force_terminal=False, width=60, highlight=False)
 
     publish_full_response(console, "Root disk is 44% full.")
 
-    assert "∴ Root disk is 44% full." in buf.getvalue()
+    assert "● Root disk is 44% full." in buf.getvalue()
 
 
 def _tty_console() -> tuple[Console, io.StringIO]:
@@ -111,9 +112,8 @@ class TestNonTtyFallback:
 
         output = buf.getvalue()
         assert result == "Hello, world"
-        # The inline ``∴`` marker + text reach piped output so captured logs
-        # are useful (the standalone label header was removed).
-        assert "∴" in output
+        # The inline label + text reach piped output so captured logs are useful.
+        assert "●" in output
         assert "Hello, world" in output
         # No spinner / Live cursor-movement artifacts in non-TTY captures.
         assert "thinking" not in output
@@ -143,8 +143,8 @@ class TestNonTtyFallback:
 
         assert result == '{"actions":[]}'
         output = buf.getvalue()
-        # No bullet header for suppressed responses.
-        assert "∴" not in output
+        # No assistant label for suppressed responses.
+        assert "●" not in output
         assert '{"actions"' not in output
 
 
@@ -180,16 +180,16 @@ class TestTtyParagraphRender:
         result = stream_to_console(
             console,
             label="assistant",
-            chunks=_yield_chunks(["Run **opensre", " investigate** to start."]),
+            chunks=_yield_chunks(["Run **opensre", " setup** to start."]),
         )
 
         output = _strip_ansi(buf.getvalue())
-        assert result == "Run **opensre investigate** to start."
-        # Bullet row marker pinned above the rendered paragraph.
-        assert "∴" in output
+        assert result == "Run **opensre setup** to start."
+        # The assistant label is pinned beside the rendered paragraph.
+        assert "●" in output
         # End-of-stream force-flush rendered Markdown — ``**`` stripped.
         assert "**opensre" not in output
-        assert "opensre investigate" in output
+        assert "opensre setup" in output
 
     def test_renders_first_paragraph_before_second_completes(self) -> None:
         """A complete paragraph (``\\n\\n``) flushes immediately, even
@@ -217,14 +217,31 @@ class TestTtyParagraphRender:
         assert "**para**" not in output
 
     def test_preserves_blank_line_between_list_and_following_paragraph(self) -> None:
-        """Standalone Rich list renders have no trailing vertical space."""
+        """One blank line between a list and the next paragraph — no double gap.
+
+        The whole reply hangs in the labeled gutter, so the list and the following
+        paragraph sit in the indented body column.
+        """
         console, buf = _tty_console()
         text = "Ready:\n\n- first\n- second\n\nBlocked pending a choice."
 
         stream_to_console(console, label="OpenSRE", chunks=_yield_chunks([text]))
 
         visible = "\n".join(line.rstrip() for line in _strip_ansi(buf.getvalue()).splitlines())
-        assert "Ready:\n\n • first\n • second\n\nBlocked pending a choice." in visible
+        assert ("● Ready:\n\n   • first\n   • second\n\n  Blocked pending a choice.") in visible
+
+    def test_reply_hangs_indented_under_the_label(self) -> None:
+        """A wrapped reply hangs in the gutter: line one carries the label,
+        every continuation line aligns in the indented body column."""
+        console, buf = _tty_console()
+        text = "A fairly long assistant reply that has to wrap across several lines. " * 3
+
+        stream_to_console(console, label="assistant", chunks=_yield_chunks([text]))
+
+        lines = [line for line in _strip_ansi(buf.getvalue()).splitlines() if line.strip()]
+        assert lines[0].startswith("● ")
+        assert len(lines) > 1  # the reply actually wrapped
+        assert all(line.startswith(" " * 2) for line in lines[1:])
 
     def test_paragraph_break_across_chunk_boundary_flushes(self) -> None:
         """The cross-chunk seam — chunk N ends with ``\\n``, chunk N+1
@@ -623,9 +640,9 @@ class TestTtyParagraphRender:
         )
 
         assert result == ""
-        # The marker is inline on the first paragraph, so an empty stream prints
-        # no marker at all — and no spinner residue at finalize.
-        assert "∴" not in _strip_ansi(buf.getvalue())
+        # The label is inline on the first paragraph, so an empty stream prints
+        # no label at all — and no spinner residue at finalize.
+        assert "●" not in _strip_ansi(buf.getvalue())
 
 
 class TestMidStreamError:
@@ -735,25 +752,25 @@ class TestTimingFooter:
 
 
 class TestRenderResponseHeader:
-    """``render_response_header`` is the bullet-row marker shared with
+    """``render_response_header`` is the assistant marker shared with
     ``action_turn.run_action_tool_turn`` — three call sites collapsed
     to one helper, so we lock in the visible output here.
     """
 
-    def test_emits_bullet_glyph_and_label(self) -> None:
+    def test_emits_marker_without_internal_role(self) -> None:
         console, buf = _tty_console()
         render_response_header(console, "assistant")
         output = _strip_ansi(buf.getvalue())
-        assert "∴" in output
-        assert "assistant" in output
+        assert "●" in output
+        assert "assistant" not in output
 
-    def test_label_is_passthrough(self) -> None:
-        """The function takes the label verbatim — callers pass either
-        ``STREAM_LABEL_ANSWER`` or ``STREAM_LABEL_ASSISTANT`` (or any
-        free-form word). No filtering, no defaults."""
+    def test_role_label_is_accepted_but_not_painted(self) -> None:
+        """Callers still pass ``STREAM_LABEL_ANSWER`` / ``STREAM_LABEL_ASSISTANT``
+        for port compatibility; the shell no longer echoes the dim role word."""
         console, buf = _tty_console()
         render_response_header(console, "answer")
-        assert "answer" in _strip_ansi(buf.getvalue())
+        assert "answer" not in _strip_ansi(buf.getvalue())
+        assert "●" in _strip_ansi(buf.getvalue())
 
 
 class TestFormatTokenCountShort:
@@ -1054,9 +1071,9 @@ class TestSuppressionPeek:
         )
 
         assert result == '{"actions":[]}'
-        # No bullet header, no markdown, no live-region artifacts.
+        # No assistant label, no markdown, no live-region artifacts.
         output = _strip_ansi(buf.getvalue())
-        assert "∴" not in output
+        assert "●" not in output
         assert '{"actions"' not in output
 
     def test_renders_normally_when_first_char_does_not_match(self) -> None:
@@ -1070,7 +1087,7 @@ class TestSuppressionPeek:
 
         assert result == "Hello, world"
         output = _strip_ansi(buf.getvalue())
-        assert "∴" in output
+        assert "●" in output
         assert "Hello, world" in output
 
     def test_skips_leading_whitespace_before_deciding(self) -> None:
@@ -1085,7 +1102,7 @@ class TestSuppressionPeek:
 
         assert result == '  \n{"action":"slash"}'
         output = _strip_ansi(buf.getvalue())
-        assert "∴" not in output
+        assert "●" not in output
 
 
 class TestRenderMarkdownBlock:
@@ -1114,6 +1131,16 @@ class TestRenderMarkdownBlock:
         render_markdown_block(console, "Check __init__.py for the export list.")
 
         assert "__init__.py" in _strip_ansi(buf.getvalue())
+
+    def test_dunder_filename_inside_a_code_span_keeps_no_backslashes(self) -> None:
+        """Code spans render verbatim, so the escape must not reach into them."""
+        console, buf = _non_tty_console()
+
+        render_markdown_block(console, "Resolved `core/agent_harness/__init__.py` and README.")
+
+        output = _strip_ansi(buf.getvalue())
+        assert "core/agent_harness/__init__.py" in output
+        assert "\\_" not in output
 
     def test_strips_terminal_controls_from_model_prose(self) -> None:
         """Intermediate/closing model commentary must not inject ESC/BEL."""
@@ -1291,17 +1318,22 @@ class TestDeferWantMeToCloser:
         assert buf.getvalue() == ""
 
 
-def test_stream_hides_session_goal_tags_but_keeps_them_in_return_text() -> None:
-    """Host evaluate needs tags; the TTY must not show them."""
-    console, buf = _tty_console()
-    text = "Hello done.\n\nsession_goal:done=0,1,2 session_goal:achieved"
-    result = stream_to_console(
-        console,
-        label="assistant",
-        chunks=_yield_chunks([text]),
+def test_reply_rows_stop_short_of_the_last_column() -> None:
+    # Arrange: a wide terminal and a reply that wraps once at that width.
+    width = 210
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, width=width, highlight=False)
+    text = (
+        "Tracer-Cloud/opensre: 8151 runs in 30 days, 1174 of 5727 PR runs failed, 333 "
+        "CI-caused, 8.9d of developer downtime (43.4d wall clock) on merged PRs. Figures "
+        "as of 2026-09-09 17:01 UTC, from the saved snapshot."
     )
-    painted = _strip_ansi(buf.getvalue())
-    assert "session_goal:" not in painted
-    assert "Hello done" in painted
-    assert "session_goal:done=0,1,2" in result
-    assert "session_goal:achieved" in result
+
+    # Act
+    publish_full_response(console, text)
+
+    # Assert: no rendered row reaches the terminal width, so the terminal never
+    # auto-wraps a padded row before the newline.
+    rows = [re.sub(r"\x1b\[[0-9;]*m", "", row) for row in buf.getvalue().split("\n")]
+    assert rows and max(len(row) for row in rows) < width
+    assert "snapshot." in "".join(rows)

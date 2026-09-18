@@ -8,7 +8,7 @@ roles are kept deliberately separate, mirroring a storage-vs-repository split:
   logical session (open, append, flush, reopen). Backends: JSONL (production)
   and in-memory (tests).
 - :class:`SessionRepo` — cross-session queries over every stored session
-  (list recent, load one for ``/resume``, browse RCA history).
+  (list recent, load one for ``/resume``).
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ class RestoreContextKey(StrEnum):
     ACCUMULATED_CONTEXT = "accumulated_context"
     SESSION_GOAL_STATE = "session_goal_state"
     TASK_PLAN_STATE = "task_plan_state"
+    PENDING_USER_CHOICE_STATE = "pending_user_choice_state"
     HISTORY = "history"
 
 
@@ -122,15 +123,6 @@ class SessionStore(Protocol):
     ) -> str:
         raise NotImplementedError
 
-    def append_investigation_result(
-        self,
-        session_id: str,
-        state: dict[str, Any],
-        *,
-        trigger: str = "",
-    ) -> str:
-        raise NotImplementedError
-
     def flush(self, session: SessionPersistenceSource) -> None:
         raise NotImplementedError
 
@@ -149,13 +141,4 @@ class SessionRepo(Protocol):
         raise NotImplementedError
 
     def load_session(self, session_id_prefix: str) -> dict[str, Any] | None:
-        raise NotImplementedError
-
-    def load_investigation_history(self, n: int = 50) -> list[dict[str, Any]]:
-        raise NotImplementedError
-
-    def lookup_investigation(self, prefix: str) -> tuple[dict[str, Any] | None, int]:
-        raise NotImplementedError
-
-    def load_investigation(self, prefix: str) -> dict[str, Any] | None:
         raise NotImplementedError

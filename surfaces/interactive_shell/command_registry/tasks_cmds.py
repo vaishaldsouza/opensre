@@ -10,7 +10,7 @@ from rich.markup import escape
 from surfaces.interactive_shell.command_registry.types import (
     SlashCommand,
 )
-from surfaces.interactive_shell.runtime import Session, TaskKind, TaskRecord, TaskStatus
+from surfaces.interactive_shell.runtime import Session, TaskRecord, TaskStatus
 from surfaces.interactive_shell.ui import (
     BOLD_BRAND,
     DIM,
@@ -24,7 +24,6 @@ from surfaces.shared.terminal.components.time_format import format_repl_timestam
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[mA-Za-z]")
 _MAX_DETAIL_CHARS = 120
-_WATCHDOG_PID = re.compile(r"pid=(\d+)")
 
 
 def _task_started_label(task: TaskRecord) -> str:
@@ -38,15 +37,6 @@ def _task_duration_label(task: TaskRecord) -> str:
     return f"{duration:.1f}s"
 
 
-def _synthetic_scenario_label(command: str) -> str:
-    """Extract the short scenario identifier from a synthetic test command string."""
-    if "--scenario" in command:
-        return command.split("--scenario", 1)[1].strip()
-    if command.strip().endswith("all"):
-        return "all"
-    return command.strip()
-
-
 def _clean_first_line(text: str) -> str:
     """Strip ANSI codes and return the first non-empty line of ``text``."""
     clean = _ANSI_ESCAPE.sub("", text)
@@ -54,13 +44,7 @@ def _clean_first_line(text: str) -> str:
 
 
 def _kind_label(task: TaskRecord) -> str:
-    """Return a concise kind label — for synthetic tests use the scenario name."""
-    if task.kind == TaskKind.SYNTHETIC_TEST and task.command:
-        return _synthetic_scenario_label(task.command)
-    if task.kind == TaskKind.WATCHDOG and task.command:
-        match = _WATCHDOG_PID.search(task.command)
-        if match:
-            return f"watchdog {match.group(1)}"
+    """Return a concise task-kind label."""
     return task.kind.value
 
 
@@ -71,35 +55,7 @@ def _task_detail_label(task: TaskRecord) -> str:
             return line[:_MAX_DETAIL_CHARS] + "…"
         return line or "—"
 
-    # Synthetic tests: the kind column already carries the scenario, so show
-    # only the compact outcome here (e.g. "exit code 1" or "ok").
-    if task.kind == TaskKind.SYNTHETIC_TEST:
-        if task.error:
-            err_line = _clean_first_line(task.error)
-            # "exit code 1: …" → keep only "exit code 1"
-            outcome = err_line.split(":")[0].strip() if ":" in err_line else err_line
-            return outcome or "—"
-        if task.result:
-            return task.result
-        if task.command:
-            return _synthetic_scenario_label(task.command)
-        return "—"
-
-    if task.kind == TaskKind.WATCHDOG:
-        if task.error:
-            raw = task.error
-        elif task.result:
-            raw = task.result
-        elif task.command:
-            raw = task.command
-        else:
-            return "—"
-        first_line = _clean_first_line(raw)
-        if len(first_line) > _MAX_DETAIL_CHARS:
-            return first_line[:_MAX_DETAIL_CHARS] + "…"
-        return first_line or "—"
-
-    # All other task kinds: show error > result > command, first line, truncated.
+    # Show error > result > command, first line, truncated.
     if task.error:
         raw = task.error
     elif task.result:
@@ -152,7 +108,7 @@ def _cmd_tasks(session: Session, console: Console, _args: list[str]) -> bool:
 def _cmd_stop(session: Session, console: Console, args: list[str]) -> bool:  # noqa: ARG001
     console.print(
         f"[{DIM}]in-flight work: press[/] [bold]Ctrl+C[/bold] "
-        f"[{DIM}]during a streaming investigation, or run[/] [{HIGHLIGHT}]/tasks[/] "
+        f"[{DIM}]during a streaming turn, or run[/] [{HIGHLIGHT}]/tasks[/] "
         f"[{DIM}]then[/] [{HIGHLIGHT}]/cancel <id>[/] [{DIM}]for background tasks.[/]"
     )
     return True
@@ -185,18 +141,11 @@ def _cmd_cancel(session: Session, console: Console, args: list[str]) -> bool:
         return True
 
     task.request_cancel()
-    if task.kind == TaskKind.INVESTIGATION:
-        console.print(
-            f"[{WARNING}]cancellation signaled.[/] "
-            f"[{DIM}]if the investigation is still streaming, press[/] [bold]Ctrl+C[/bold] "
-            f"[{DIM}]to interrupt the current run.[/]"
-        )
-    else:
-        console.print(
-            f"[{HIGHLIGHT}]stop requested[/] "
-            f"[{DIM}]for {escape(task.kind.value)} {escape(task.task_id)}.[/] "
-            f"[{DIM}]use[/] [{HIGHLIGHT}]/tasks[/] [{DIM}]to confirm status.[/]"
-        )
+    console.print(
+        f"[{HIGHLIGHT}]stop requested[/] "
+        f"[{DIM}]for {escape(task.kind.value)} {escape(task.task_id)}.[/] "
+        f"[{DIM}]use[/] [{HIGHLIGHT}]/tasks[/] [{DIM}]to confirm status.[/]"
+    )
     return True
 
 
@@ -217,7 +166,7 @@ COMMANDS: list[SlashCommand] = [
     ),
     SlashCommand(
         "/stop",
-        "Show how to stop in-flight investigations and background tasks.",
+        "Show how to stop in-flight turns and background tasks.",
         _cmd_stop,
     ),
 ]

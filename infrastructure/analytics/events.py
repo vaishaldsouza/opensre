@@ -8,6 +8,13 @@ from enum import StrEnum
 class Event(StrEnum):
     # Lifecycle
     CLI_INVOKED = "cli_invoked"
+    ACCOUNT_AUTHENTICATED = "account_authenticated"
+    # Mandatory interactive-shell sign-in gate: exposure, then one explicit
+    # choice per menu round. Choosing sign-in is intent only; the account link
+    # is ``account_authenticated``.
+    SIGN_IN_PROMPTED = "sign_in_prompted"
+    SIGN_IN_SELECTED = "sign_in_selected"
+    STAY_SIGNED_OUT_SELECTED = "stay_signed_out_selected"
     REPL_EXECUTION_POLICY_DECISION = "repl_execution_policy_decision"
     INSTALL_DETECTED = "install_detected"
     USER_ID_LOAD_FAILED = "user_id_load_failed"
@@ -18,18 +25,6 @@ class Event(StrEnum):
     ONBOARD_COMPLETED = "onboard_completed"
     ONBOARD_FAILED = "onboard_failed"
 
-    # Investigation
-    INVESTIGATION_STARTED = "investigation_started"
-    INVESTIGATION_COMPLETED = "investigation_completed"
-    INVESTIGATION_FAILED = "investigation_failed"
-    INVESTIGATION_CANCELLED = "investigation_cancelled"
-    INVESTIGATION_OUTCOME = "investigation_outcome"
-    INVESTIGATION_FIRST_HYPOTHESIS_RENDERED = "investigation_first_hypothesis_rendered"
-    INVESTIGATION_ABANDONED = "investigation_abandoned"
-    INVESTIGATION_FEEDBACK_SUBMITTED = "investigation_feedback_submitted"
-    INVESTIGATION_MISS_CLASSIFIED = "investigation_miss_classified"
-    DIAGNOSIS_CATEGORY_MISMATCH = "diagnosis_category_mismatch"
-
     # Integrations
     INTEGRATION_SETUP_STARTED = "integration_setup_started"
     INTEGRATION_SETUP_COMPLETED = "integration_setup_completed"
@@ -37,22 +32,21 @@ class Event(StrEnum):
     INTEGRATION_VERIFIED = "integration_verified"
     INTEGRATIONS_LISTED = "integrations_listed"
 
-    # Tests
-    TESTS_PICKER_OPENED = "tests_picker_opened"
-    TESTS_LISTED = "tests_listed"
-    TEST_RUN_STARTED = "test_run_started"
-    TEST_RUN_COMPLETED = "test_run_completed"
-    TEST_RUN_FAILED = "test_run_failed"
-    TEST_SYNTHETIC_STARTED = "test_synthetic_started"
-    TEST_SYNTHETIC_COMPLETED = "test_synthetic_completed"
-    TEST_SYNTHETIC_FAILED = "test_synthetic_failed"
-
     # Interactive terminal analytics
     TERMINAL_ACTIONS_PLANNED = "terminal_actions_planned"
     TERMINAL_ACTIONS_EXECUTED = "terminal_actions_executed"
     TERMINAL_TURN_SUMMARIZED = "terminal_turn_summarized"
     REACT_TURN_COMPLETED = "react_turn_completed"
     AI_GENERATION = "$ai_generation"
+    AGENT_TOOL_CALL_COMPLETED = "agent_tool_call_completed"
+    ASK_USER_PROMPT_RENDERED = "ask_user_prompt_rendered"
+    ASK_USER_PROMPT_ANSWERED = "ask_user_prompt_answered"
+    ASK_USER_PROMPT_DISMISSED = "ask_user_prompt_dismissed"
+    INTERACTIVE_SHELL_RENDERED = "interactive_shell_rendered"
+    BROWSER_OPEN_REQUESTED = "browser_open_requested"
+    SKILL_EXECUTED = "skill_executed"
+    OPENSRE_COMMIT_CREATED = "opensre_commit_created"
+    OPENSRE_CI_EPOCH_RESOLVED = "opensre_ci_epoch_resolved"
 
     # Gateway chat turns (Slack / Telegram) — usage sessions, not inventory
     GATEWAY_TURN_STARTED = "gateway_turn_started"
@@ -79,3 +73,8 @@ class Event(StrEnum):
     LOOP_SUGGESTION_PROMPTED = "loop_suggestion_prompted"
     LOOP_SUGGESTION_SELECTED = "loop_suggestion_selected"
     LOOP_SUGGESTION_SKIPPED = "loop_suggestion_skipped"
+
+    # Onboarding demo picker (interactive-shell startup, first experience)
+    ONBOARDING_DEMO_PROMPTED = "onboarding_demo_prompted"
+    ONBOARDING_DEMO_SELECTED = "onboarding_demo_selected"
+    ONBOARDING_DEMO_SKIPPED = "onboarding_demo_skipped"

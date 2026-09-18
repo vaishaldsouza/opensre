@@ -1,64 +1,36 @@
 ---
 title: "Install OpenSRE"
-description: "Install the OpenSRE CLI on your machine and get ready to investigate."
+description: "Install the OpenSRE CLI on your machine and start chatting with the agent."
 ---
 
-This page gets the `opensre` command onto your laptop or server, then walks you through the short setup so you can run investigations.
+## Before you begin
 
-## What you get
+Make sure you have:
 
-After install, you have:
+- A terminal open in a code project
+- A Git repository (recommended for the full workflow demonstration)
 
-- The `opensre` CLI on your PATH
-- An interactive shell when you run `opensre` with no arguments
-- A short setup that signs you into GitHub and configures your LLM
-
-No sudo required on macOS/Linux in the usual case — the installer puts the binary somewhere writable (often `~/.local/bin`) and tells you if you need a PATH tweak.
-
-## Install
-
-Pick one method.
-
-**One-line installer (most people):**
+## Step 1: Install and start opensre
 
 ```bash
-# macOS / Linux
 curl -fsSL https://install.opensre.com | bash
-
-# Windows (PowerShell)
-irm https://install.opensre.com | iex
 ```
 
-In a normal interactive terminal, the installer often starts `opensre setup` for you when it finishes. In CI or scripts it skips that and prints what to do next.
-
-Don't want auto-setup?
+Then start OpenSRE:
 
 ```bash
-curl -fsSL https://install.opensre.com | OPENSRE_AUTO_LAUNCH=0 bash
+opensre
 ```
 
-**Homebrew:**
+![OpenSRE CLI welcome screen with the sign-in prompt](/images/opensre-welcome.png)
 
-```bash
-brew tap tracer-cloud/tap
-brew install tracer-cloud/tap/opensre
-```
+Use a macOS or Linux terminal. On Windows, use [WSL](/environments/windows-local).
 
-More options (PATH notes, skipping GitHub CLI install, on-prem layout): [Install locally](/install-local).
+For PATH troubleshooting and platform requirements, see [Install locally](/install-local).
 
-## Set things up
+## Step 2: Sign in
 
-If setup didn't start automatically, run it yourself:
-
-```bash
-opensre setup
-```
-
-The wizard asks for:
-
-1. **GitHub sign-in** — browser device authorization (required)
-2. **An LLM provider** — Claude Code, OpenAI, OpenRouter, or another supported provider
-3. **A model and credential** — an API key, CLI login, or local endpoint depending on the provider
+Choose **Sign in or create account** in the welcome screen. Your browser opens the OpenSRE sign-up page. Create an account or sign in using email or another enabled provider; a successful login activates the hosted model, so no separate LLM key is required. Add GitHub later as an optional integration if you want OpenSRE to work with repositories.
 
 When that finishes, OpenSRE opens the interactive shell. Add tools later, when you need them:
 
@@ -66,10 +38,17 @@ When that finishes, OpenSRE opens the interactive shell. Add tools later, when y
 opensre integrations setup <service>
 ```
 
-To change only the LLM later (without GitHub again):
+For the guided integration and optional local-model wizard, run:
 
 ```bash
 opensre onboard
+```
+
+To inspect or end the account session later:
+
+```bash
+opensre account status
+opensre account logout
 ```
 
 Then check that the tools you connected work:
@@ -78,19 +57,17 @@ Then check that the tools you connected work:
 opensre integrations verify
 ```
 
-## Try a quick investigation
+## Step 3: Ask your first question
 
-```bash
-opensre investigate -i tests/e2e/kubernetes/fixtures/datadog_k8s_alert.json
-```
-
-Or open the shell and describe what's going on:
+Open the shell and describe what's going on:
 
 ```bash
 opensre
 ```
 
-Full walkthrough with GIFs: [Quickstart](/quickstart).
+Ask: *why is checkout latency spiking?*
+
+Full walkthrough with screenshots: [Quickstart](/quickstart).
 
 ## Environment-specific guides
 
@@ -104,7 +81,7 @@ Full walkthrough with GIFs: [Quickstart](/quickstart).
 ## Stuck?
 
 - **Command not found** — open a new terminal, or add the bin directory the installer printed to your PATH
-- **Onboard can't reach your LLM** — check the key and network; you can save and retry later
+- **The shell keeps asking you to sign in** — run `opensre account status`; expired, revoked, incomplete, or unreachable sessions do not open the shell
 - **Docker / `make` missing** — see [Quickstart troubleshooting](/quickstart#troubleshooting)
 
 Need deploy options beyond a laptop binary? See [Deployment](/deployment).

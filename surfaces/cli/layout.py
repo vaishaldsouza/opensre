@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 import click
 from rich.console import Console
 from rich.text import Text
 
 from infrastructure.terminal.theme import BRAND, DIM, TEXT
-from surfaces.shared.terminal.banner import build_launch_banner
 
 #: First-run actions only. Everything else is discoverable via ``opensre --help``;
 #: a landing page that lists every command reads as "here is everything" rather
 #: than "start here".
 _LANDING_EXAMPLES: tuple[tuple[str, str], ...] = (
-    ("opensre setup", "Sign in with GitHub, add an LLM key, then open the shell"),
+    ("opensre setup", "Sign in to OpenSRE, activate the hosted model, then open the shell"),
     ('opensre ask "why is checkout-api slow?"', "Ask the agent a question directly"),
-    ("opensre investigate -i alert.json", "Run a root-cause investigation on an alert"),
     ("opensre doctor", "Check this machine is set up correctly"),
     ("opensre --help", "See every command"),
 )
@@ -31,7 +30,6 @@ _GETTING_STARTED: tuple[str, ...] = (
     "ask",
     "doctor",
     "health",
-    "investigate",
 )
 
 #: Day-to-day operation once configured.
@@ -58,6 +56,9 @@ def _partition_commands(
 
 
 def _commands_from_group(group: click.Group) -> tuple[tuple[str, str], ...]:
+    help_rows = getattr(group, "help_command_rows", None)
+    if callable(help_rows):
+        return cast("tuple[tuple[str, str], ...]", help_rows())
     ctx = click.Context(group)
     rows = []
     for name in group.list_commands(ctx):
@@ -121,7 +122,7 @@ def _render_rows(
 
 
 def render_help(group: click.Group) -> None:
-    """Render the root help view, deriving the command list from the live Click group."""
+    """Render the root help view from the command spec table (no command imports)."""
     console = Console(highlight=False)
     commands = _commands_from_group(group)
     options = _options_from_command(group)
@@ -141,6 +142,8 @@ def render_help(group: click.Group) -> None:
 
 def render_landing(group: click.Group) -> None:
     """Render the root landing page shown with no subcommand."""
+    from surfaces.shared.terminal.banner import build_launch_banner
+
     console = Console(highlight=False)
     options = _options_from_command(group)
     console.print()
@@ -148,7 +151,7 @@ def render_landing(group: click.Group) -> None:
     console.print(
         Text.assemble(
             ("  ", ""),
-            "open-source SRE agent for automated incident investigation and root cause analysis",
+            "open-source SRE agent",
         )
     )
     console.print()

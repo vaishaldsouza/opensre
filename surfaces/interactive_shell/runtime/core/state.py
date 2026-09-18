@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from prompt_toolkit.application.current import get_app_or_none
 
 from infrastructure.terminal import theme as ui_theme
+from infrastructure.terminal.spinner_frames import BRAILLE_SPINNER_FRAMES, spinner_frames
 from surfaces.shared.terminal.components.token_format import (
     _CHARS_PER_TOKEN,
     format_token_count_short,
@@ -36,17 +37,17 @@ def ready_hint_ansi() -> str:
     reserved = prompt_text_width(lead)
     if reserved >= width:
         visible = clip_prompt_text(f"{lead}{hint}", width)
-        # Keep accent on "Ready" when the clipped form still starts with it.
+        # Soft grey lead; the warm accent is reserved for active transcript chrome.
         if visible.startswith("Ready"):
             rest = visible[len("Ready") :]
             return (
-                f"{ui_theme.PROMPT_ACCENT_ANSI}Ready{ui_theme.ANSI_RESET}"
+                f"{ui_theme.BOLD_REPLY_MARKER_ANSI}Ready{ui_theme.ANSI_RESET}"
                 f"{ui_theme.DIM_ANSI}{rest}{ui_theme.ANSI_RESET}"
             )
         return f"{ui_theme.DIM_ANSI}{visible}{ui_theme.ANSI_RESET}"
     clipped_hint = clip_prompt_text(hint, width - reserved)
     return (
-        f"{ui_theme.PROMPT_ACCENT_ANSI}Ready{ui_theme.ANSI_RESET}"
+        f"{ui_theme.BOLD_REPLY_MARKER_ANSI}Ready{ui_theme.ANSI_RESET}"
         f"{ui_theme.DIM_ANSI} · {clipped_hint}{ui_theme.ANSI_RESET}"
     )
 
@@ -225,7 +226,8 @@ class ReplState:
 class SpinnerState:
     """Mutable state read by prompt callbacks for toolbar + inline spinner."""
 
-    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    # Braille by default; a caller may pass its own frames at construction.
+    _SPINNER_FRAMES: tuple[str, ...] = BRAILLE_SPINNER_FRAMES
     # One glyph advance per interval of *elapsed time*. The frame must be a
     # pure function of the clock, never of how often the prompt message
     # callback runs: prompt_toolkit evaluates the message several times per
@@ -244,7 +246,9 @@ class SpinnerState:
     # Traveling light wave across the status sentence (Cursor / Droid style).
     _SHIMMER_PERIOD_SECONDS = 1.5
 
-    def __init__(self) -> None:
+    def __init__(self, frames: tuple[str, ...] | None = None) -> None:
+        if frames:
+            self._SPINNER_FRAMES = tuple(frames)
         self.streaming: bool = False
         self.started_at: float = 0.0
         self.bytes_in: int = 0
@@ -308,10 +312,10 @@ class SpinnerState:
     def set_phase(self, label: str) -> None:
         """Animate a caller-supplied phase label on the status row.
 
-        Investigation stages (``/investigate``) dispatch deterministically, so
-        the turn-level spinner may not have been started. The progress display
-        calls this to keep the prompt spinner cycling with the active pipeline
-        stage; it can be called repeatedly to advance the phase.
+        Some dispatch paths run deterministically, so the turn-level spinner
+        may not have been started. The progress display calls this to keep the
+        prompt spinner cycling with the active stage; it can be called
+        repeatedly to advance the phase.
         """
         if not self.streaming:
             self.started_at = time.monotonic()
@@ -342,33 +346,20 @@ class SpinnerState:
         return ready_hint_ansi()
 
     def _phase_shimmer_high_hex(self) -> str:
-        """Peak color for the status-sentence light wave (matches phase accent)."""
-        theme = ui_theme.get_active_theme()
-        if self.phase in (self.INVOKING_TOOLS_PHASE, self.EXECUTING_PHASE):
-            return theme.BRAND
-        return theme.HIGHLIGHT
+        """Warm peak for the status wave (sunny gold, not icy blue)."""
+        return ui_theme.reply_marker_hex()
 
     def _phase_accent_ansi(self) -> str:
-        """Accent for the spinner glyph, distinct per load-state phase.
-
-        ``Thinking…`` (and pipeline stage labels) stay on the prompt accent (bold
-        highlight); ``Executing…`` uses brand; ``Invoking tools…`` uses bold
-        brand — the same hue as executing but heavier, so tool work reads as the
-        hottest state while staying different from thinking.
-        """
-        if self.phase == self.INVOKING_TOOLS_PHASE:
-            return ui_theme.BOLD_BRAND_ANSI
-        if self.phase == self.EXECUTING_PHASE:
-            return ui_theme.BRAND_ANSI
-        return ui_theme.PROMPT_ACCENT_ANSI
+        """Paint the spinner glyph with the transcript accent."""
+        return ui_theme.BOLD_REPLY_MARKER_ANSI
 
     def inline_spinner_ansi(self) -> str:
-        """One status row: shimmering phase (+ live tool) · stop hint · elapsed.
+        """One status row: quiet phase (+ live tool) · stop hint · elapsed.
 
         When a tool is in flight the label becomes
         ``Invoking tools… · GitHub CLI · gh api …`` so awareness stays on the
-        same row as the spinner — never a second reserved prompt row. A traveling
-        light wave runs across that sentence while work is in flight.
+        same row as the spinner — never a second reserved prompt row. A soft
+        silver wave runs across the sentence; the glyph alone carries warmth.
         """
         if not self.streaming:
             return ""
@@ -378,9 +369,9 @@ class SpinnerState:
         glyph = self._SPINNER_FRAMES[frame_idx % len(self._SPINNER_FRAMES)]
         if token_count > 0:
             tokens_str = format_token_count_short(token_count)
-            elapsed_badge = f"[ {elapsed:.0f}s · ↓ {tokens_str} tokens]"
+            elapsed_badge = f"[{elapsed:.0f}s · ↓ {tokens_str} tokens]"
         else:
-            elapsed_badge = f"[ {elapsed:.0f}s]"
+            elapsed_badge = f"[{elapsed:.0f}s]"
         label = self.phase or self.THINKING_PHASE
         action = self.active_action
         if action:
@@ -389,7 +380,9 @@ class SpinnerState:
         # not soft-wrap, which desyncs row height vs the one-row confirmation
         # prefix and leaves stale spinner/status lines.
         lead = f"{glyph} "
-        tail = f" {self._STOP_HINT}  {elapsed_badge}"
+        # Single spaces throughout the row: the hint and the elapsed badge sit
+        # one cell apart like every other token, and the badge hugs its brackets.
+        tail = f" {self._STOP_HINT} {elapsed_badge}"
         accent = self._phase_accent_ansi()
         width = prompt_line_width()
         reserved = prompt_text_width(lead) + prompt_text_width(tail)
@@ -425,7 +418,7 @@ def create_repl_mutable_state(
     """Return the canonical initial mutable state objects for a REPL runtime."""
     return ReplMutableState(
         state=state if state is not None else ReplState(),
-        spinner=spinner if spinner is not None else SpinnerState(),
+        spinner=spinner if spinner is not None else SpinnerState(frames=spinner_frames()),
     )
 
 

@@ -1,11 +1,10 @@
-"""``AgentSession`` — the embedder's entry point for chat and investigation.
+"""``AgentSession`` — the embedder's entry point for chat.
 
 Create the session, attach an agent, run turns::
 
     session = AgentSession.start(config)  # builds the default agent
     result = session.chat("…")            # turn 1
     follow = session.chat("…")            # turn 2 — same attached agent
-    report = session.investigate({…}, runner=run)  # needs no attached chat agent
 
 Embedded scripts that need local adapters use
 ``bootstrap.embedded.start_embedded_session``. Scheduled one-shots may use
@@ -14,7 +13,7 @@ Embedded scripts that need local adapters use
 A host with its own ports (the gateway pool, the REPL) builds the agent through
 :class:`~core.agent_harness.turns.headless_build.DefaultHeadlessBuild` and drives it
 with :meth:`HeadlessAgent.handle` per message; it may still attach it here to
-use :meth:`chat` and :meth:`investigate`.
+use :meth:`chat`.
 
 Session lifecycle (create / resolve / rotate / restore) belongs to
 :class:`~core.agent_harness.session.lifecycle.SessionManager`; this module adds
@@ -33,14 +32,10 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from core.agent_harness.session import SessionManager
 
 if TYPE_CHECKING:
-    from core.agent_harness.investigation_api import (
-        AlertInput,
-        InvestigationPayloadRunner,
-        InvestigationResult,
-    )
     from core.agent_harness.ports import (
         OutputSink,
         PromptContextProvider,
+        ToolEventObserver,
         ToolProvider,
         TurnBinding,
     )
@@ -85,6 +80,9 @@ class SessionConfig:
     """
 
     session_id: str | None = None
+    # A caller can preallocate a fresh identity (for example, before acquiring
+    # a cross-process lease) without asking the harness to restore that ID.
+    new_session_id: str | None = None
     prompts: PromptContextProvider | None = None
     load_env: bool = True
     hydrate_integrations: bool = True
@@ -124,7 +122,7 @@ class SessionStartupResult:
 
 
 class AgentSession:
-    """Public host API: ``start`` / ``chat`` / ``investigate``.
+    """Public host API: ``start`` / ``chat``.
 
     Order of startup steps matters: env vars must be resolved before session
     creation (integration hydration/warm may depend on env-provided credentials),
@@ -151,6 +149,8 @@ class AgentSession:
         surface: str | None = None,
         is_tty: bool | None = None,
         tool_hooks: ToolExecutionHooks | None = None,
+        tool_event_observer: ToolEventObserver | None = None,
+        unattended: bool = False,
     ) -> AgentSession:
         """Return a session that is ready to :meth:`chat`.
 
@@ -174,8 +174,9 @@ class AgentSession:
         are the :class:`~core.agent_harness.turns.headless_build.DefaultHeadlessBuild`
         fields; ``tools`` the port its ``agent()`` takes;
         ``is_tty`` and ``tool_hooks`` (the turn's approval hooks) are bound on
-        the first turn. A host that needs more (its own sink, prompts, error
-        reporter, an action ``llm_factory``) builds through
+        the first turn. ``tool_event_observer`` receives action-tool lifecycle
+        events from the default tool provider. A host that needs more (its own
+        sink, prompts, error reporter, an action ``llm_factory``) builds through
         :class:`DefaultHeadlessBuild` itself and calls :meth:`attach_agent`.
         """
         from core.agent_harness.turns.headless_adapters import BufferOutputSink
@@ -195,6 +196,8 @@ class AgentSession:
             surface=surface,
             is_tty=is_tty,
             tool_hooks=tool_hooks,
+            tool_event_observer=tool_event_observer,
+            unattended=unattended,
         )
         return agent_session
 
@@ -208,6 +211,8 @@ class AgentSession:
         prepare_session: Callable[[SessionCore], None] | None = None,
         logger: logging.Logger | None = None,
         is_tty: bool | None = None,
+        unattended: bool = False,
+        tool_hooks: ToolExecutionHooks | None = None,
     ) -> TurnResult:
         """Run exactly one turn for ``message`` on a throwaway session.
 
@@ -222,6 +227,8 @@ class AgentSession:
             prepare_session=prepare_session,
             logger=logger,
             is_tty=is_tty,
+            unattended=unattended,
+            tool_hooks=tool_hooks,
         ).chat(message)
 
     def startup(self) -> SessionStartupResult:
@@ -317,30 +324,6 @@ class AgentSession:
             on_progress=on_progress,
         )
 
-    def investigate(
-        self,
-        alert: AlertInput,
-        *,
-        runner: InvestigationPayloadRunner,
-        opensre_evaluate: bool = False,
-        investigation_metadata: tuple[str, str] | None = None,
-    ) -> InvestigationResult:
-        """Run an investigation through ``runner`` and return a typed result.
-
-        ``agent_harness`` must not import ``tools``, so the caller (a surface or
-        the gateway) supplies the payload callable — normally
-        :func:`tools.investigation.capability.run_investigation_payload`. Does
-        not require an attached chat agent.
-        """
-        from core.agent_harness.investigation_api import InvestigationResult
-
-        payload = runner(
-            raw_alert=alert,
-            opensre_evaluate=opensre_evaluate,
-            investigation_metadata=investigation_metadata,
-        )
-        return InvestigationResult.from_payload(payload)
-
     def resolve_integrations(self, session: SessionCore) -> dict[str, Any]:
         """Return resolved integration configs for ``session``."""
         from core.agent_harness.session.integration_resolution import resolve_and_cache_integrations
@@ -359,6 +342,8 @@ class AgentSession:
         surface: str | None = None,
         is_tty: bool | None = None,
         tool_hooks: ToolExecutionHooks | None = None,
+        tool_event_observer: ToolEventObserver | None = None,
+        unattended: bool = False,
     ) -> None:
         """Attach the agent built on the default port family (one construction recipe).
 
@@ -370,7 +355,13 @@ class AgentSession:
         from core.agent_harness.turns.headless_build import DefaultHeadlessBuild
 
         agent = DefaultHeadlessBuild(
-            session=session, output=output, console=console, logger=logger, surface=surface
+            session=session,
+            output=output,
+            console=console,
+            logger=logger,
+            surface=surface,
+            tool_event_observer=tool_event_observer,
+            unattended=unattended,
         ).agent(tools=tools, prompts=prompts)
         agent.bind_turn(TurnBinding(is_tty=is_tty, tool_hooks=tool_hooks))
         self.attach_agent(agent)
@@ -395,6 +386,8 @@ class AgentSession:
         call to make based on whether the surface is resuming.
         """
         manager = self._session_manager
+        if self._config.session_id and self._config.new_session_id:
+            raise ValueError("SessionConfig cannot resume and create the same session.")
         if self._config.session_id:
             # SessionManager.resolve()'s own default is True: a resumed
             # session needs tools ready immediately.
@@ -410,12 +403,15 @@ class AgentSession:
         # SessionManager.create()'s own default is False: a fresh session can
         # warm lazily on first turn.
         warm = False if self._config.warm_integrations is None else self._config.warm_integrations
-        return manager.create(
-            hydrate_integrations=self._config.hydrate_integrations,
-            warm_integrations=warm,
-            persistent_tasks=self._config.persistent_tasks,
-            open_store=self._config.open_store,
-        )
+        create_args: dict[str, Any] = {
+            "hydrate_integrations": self._config.hydrate_integrations,
+            "warm_integrations": warm,
+            "persistent_tasks": self._config.persistent_tasks,
+            "open_store": self._config.open_store,
+        }
+        if self._config.new_session_id is not None:
+            create_args["session_id"] = self._config.new_session_id
+        return manager.create(**create_args)
 
     def _load_context(self) -> PromptContextProvider | None:
         """Return the surface's grounding-context provider, if any."""

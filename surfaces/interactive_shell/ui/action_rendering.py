@@ -25,22 +25,29 @@ from core.agent_harness.spi.accounting import SELF_RECORDING_ACTION_TOOL_NAMES
 from core.agent_harness.spi.task_plan import is_plan_diagnosis_prose
 from infrastructure.observability.trace.redaction import redact_sensitive
 from infrastructure.safety.terminal_output import strip_terminal_controls
-from infrastructure.terminal.theme import BOLD_SKILL, BRAND, DIM, HIGHLIGHT, SECONDARY
+from infrastructure.terminal.theme import (
+    BOLD_SKILL,
+    ERROR,
+    TEXT,
+)
 from infrastructure.text import is_data_blob
 from surfaces.interactive_shell.runtime import Session
 from surfaces.interactive_shell.runtime.core.state import SpinnerState
+from surfaces.interactive_shell.session.terminal_session import ActionLogEntry
+from surfaces.interactive_shell.ui.action_log import flush_action_log
 from surfaces.interactive_shell.ui.streaming import render_note_block
-from surfaces.shared.terminal.output.console_state import get_investigation_spinner
-from surfaces.shared.terminal.tables import print_command_output
+from surfaces.interactive_shell.ui.transcript import (
+    TranscriptRole,
+    transcript_continuation,
+    transcript_line,
+    transcript_prefix,
+)
+from surfaces.shared.terminal.output.console_state import get_turn_spinner
 from tools.interactive_shell.action_names import ActionToolName
 from tools.interactive_shell.shell.display import format_shell_command_for_display
 
 # Tool labels whose payload is a runnable command.
 _COMMAND_TOOL_LABELS: frozenset[str] = frozenset({"Execute", "GitHub CLI", "opensre"})
-
-# Leads every tool-call line so a call reads apart from the ``∴`` reply and the
-# ``[n] ❯`` user row — the call → result → reply hierarchy Claude Code / Droid use.
-_TOOL_CALL_MARKER = "⏺"
 
 # Tools whose preview is just ``(label, single-arg)``. The display content is the
 # stripped string value of that single argument. Anything that needs to combine
@@ -62,8 +69,6 @@ _PYTHON_URL_RE = re.compile(r"https?://[^\s'\"`]+")
 
 _SIMPLE_TOOL_LABELS: dict[str, tuple[str, str]] = {
     ActionToolName.LLM_SET_PROVIDER: ("LLM provider", "target"),
-    ActionToolName.ALERT_SAMPLE: ("sample alert", "template"),
-    ActionToolName.INVESTIGATION_START: ("investigation", "alert_text"),
     ActionToolName.TASK_CANCEL: ("cancel task", "target"),
     ActionToolName.CLI_EXEC: ("opensre", "payload"),
     ActionToolName.CODE_IMPLEMENT: ("implementation", "task"),
@@ -78,13 +83,11 @@ _SKIP_PLAN_WORK_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-#: Tools that render their own dedicated UI (the investigation lap/spinner
-#: progress). The generic live tool-call preview is suppressed for these so it
-#: does not duplicate that UI as a wall of text.
+#: Tools that render their own dedicated UI. The generic live tool-call preview
+#: is suppressed for these so it does not duplicate that UI as a wall of text.
 _SELF_RENDERING_TOOLS: frozenset[str] = frozenset(
     {
         ActionToolName.ASK_USER_CHOICE,
-        ActionToolName.INVESTIGATION_START,
         # shell_run / cli_exec stream their own ``$ <command>`` + output during
         # execution, and the running tool is folded into the status spinner row —
         # so a static ``Execute``/``opensre`` header here would print the command
@@ -110,6 +113,12 @@ def _tool_event_id(data: dict[str, Any]) -> str:
     return str(data.get("id") or data.get("tool_call_id") or "").strip()
 
 
+def _skill_view_reference(data: dict[str, Any]) -> str:
+    """The ``reference`` arg of a ``skill_view`` event, or empty for a skill entry."""
+    args = data.get("input")
+    return str(args.get("reference", "")).strip() if isinstance(args, dict) else ""
+
+
 def _is_internal_choice_command(name: str, data: dict[str, Any]) -> bool:
     """True for the private slash turn that opens the choice picker."""
     if name != ActionToolName.SLASH_INVOKE:
@@ -118,9 +127,14 @@ def _is_internal_choice_command(name: str, data: dict[str, Any]) -> bool:
     return isinstance(args, dict) and str(args.get("command", "")).strip() == "/choose"
 
 
+def _collapsed_line(value: str) -> str:
+    """One line, whitespace collapsed. Do not truncate — the action log clips to width."""
+    return " ".join(value.split())
+
+
 def _bounded_preview(value: str, *, limit: int = _TOOL_PREVIEW_MAX_CHARS) -> str:
     """Keep live progress on one useful terminal line."""
-    collapsed = " ".join(value.split())
+    collapsed = _collapsed_line(value)
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 1].rstrip() + "…"
@@ -203,7 +217,7 @@ def _github_cli_display(args: dict[str, Any]) -> tuple[str, str]:
         command.extend(["-R", repo])
     command.extend(_compact_gh_args(args.get("args")))
     preview = shlex.join(command).replace("'…'", "…")
-    return "GitHub CLI", _bounded_preview(preview)
+    return "GitHub CLI", preview
 
 
 def _python_execution_display(args: dict[str, Any]) -> tuple[str, str]:
@@ -339,10 +353,13 @@ def tool_call_display(tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
         raw_args = args.get("args")
         parsed_args = [str(item).strip() for item in raw_args] if isinstance(raw_args, list) else []
         label, content = "command", " ".join([command, *parsed_args]).strip()
-    elif tool_name == ActionToolName.SYNTHETIC_RUN:
-        suite = str(args.get("suite", "")).strip()
-        scenario = str(args.get("scenario", "")).strip()
-        label, content = "synthetic test", f"{suite}:{scenario}" if scenario else suite
+    elif tool_name == ActionToolName.SKILL_VIEW:
+        skill_name = str(args.get("name", "")).strip()
+        reference = str(args.get("reference", "")).strip()
+        if reference:
+            label, content = "Skill reference", f"references/{reference}.md · {skill_name}"
+        else:
+            label, content = "Skill", skill_name
     else:
         simple = _SIMPLE_TOOL_LABELS.get(tool_name)
         if simple is not None:
@@ -366,8 +383,8 @@ class ActionRenderObserver:
 
     Self-recording tools (``slash_invoke``, ``shell_run``, etc.) append their own
     history row; chat turns are recorded later by turn accounting when the
-    assistant runs. ``skill_view`` gets a dedicated live event: the skill name
-    on ``tool_start`` and an activation/failure child line on ``tool_end``.
+    assistant runs. ``skill_view`` gets a dedicated live event: a labeled skill
+    status line painted on ``tool_end``.
     """
 
     def __init__(self, *, session: Session, console: Console, message: str) -> None:
@@ -382,6 +399,11 @@ class ActionRenderObserver:
         if kind == "llm_start":
             self._set_spinner_phase(SpinnerState.THINKING_PHASE)
             return
+        if kind == "agent_end":
+            # Safety flush: the batch drain below normally empties the buffer,
+            # but a turn that ends without a clean drain still gets its log.
+            flush_action_log(self.console, self.session)
+            return
         if kind == "message_update":
             self._render_intermediate_message(data)
             return
@@ -395,8 +417,10 @@ class ActionRenderObserver:
                 )
             return
         if kind == "tool_end":
-            name = str(data.get("name", "")).strip()
-            if name == ActionToolName.SKILL_VIEW:
+            # Discriminate by how the start registered the call: skill entries
+            # sit in ``_pending_skill_calls`` (activation line); reference
+            # loads registered nothing and stay silent.
+            if _tool_event_id(data) in self._pending_skill_calls:
                 self._render_skill_end(data)
             elif _tool_event_id(data) in self._pending_result_tools:
                 self._render_tool_result(data)
@@ -407,6 +431,10 @@ class ActionRenderObserver:
             self._clear_active_action(data)
             if not self._has_active_action():
                 self._set_spinner_phase(SpinnerState.EXECUTING_PHASE)
+            # No per-iteration flush: the whole turn's calls are flushed once,
+            # just before the reply (``ShellOutputSink.stream``), so same-kind
+            # calls spanning iterations stay in one group. ``agent_end`` below is
+            # the fallback for turns that end without streaming a reply.
             return
         if kind != "tool_start":
             return
@@ -415,11 +443,18 @@ class ActionRenderObserver:
             return
         self._set_spinner_phase(SpinnerState.INVOKING_TOOLS_PHASE)
         if name == ActionToolName.SKILL_VIEW:
-            self._render_skill_start(data)
+            # ``reference=`` loads one bundled file without re-entering the
+            # skill. It is prompt plumbing, not a user-visible action: no
+            # transcript row (the spinner status row still names it while it
+            # runs). Only a real entry earns the "Skill activated" line.
+            if not _skill_view_reference(data):
+                self._render_skill_start(data)
         elif name == ActionToolName.UPDATE_PLAN:
             pass  # no transcript preview; the plan shows in the pinned bottom overlay
         elif _is_internal_choice_command(name, data):
             pass  # private picker plumbing; the menu owns the visible interaction
+        elif name == ActionToolName.SLASH_INVOKE:
+            pass  # a user slash command is already echoed as the ``[N]`` row
         elif name in _SELF_RENDERING_TOOLS:
             pass  # owns its UI; a generic preview would duplicate it
         else:
@@ -445,7 +480,7 @@ class ActionRenderObserver:
         # Only relabel an already-running spinner; never activate one. Literal
         # slash turns suppress the spinner (turn_start skips ``start()``) and
         # never call ``stop()``, so activating it here would leave it on screen.
-        spinner = get_investigation_spinner()
+        spinner = get_turn_spinner()
         if spinner is not None and getattr(spinner, "streaming", False):
             spinner.set_phase(label)
 
@@ -455,10 +490,10 @@ class ActionRenderObserver:
         Stacked by tool-call id: the ReAct loop emits every ``tool_start``
         before executing the batch, so a single slot would show the last
         tool and clear on the first ``tool_end``. Scrollback keeps the
-        settled ``⏺`` copy. Only relabels an already-running spinner
+        settled transcript copy. Only relabels an already-running spinner
         (see ``_set_spinner_phase``).
         """
-        spinner = get_investigation_spinner()
+        spinner = get_turn_spinner()
         if spinner is None or not getattr(spinner, "streaming", False):
             return
         args = data.get("input")
@@ -470,12 +505,12 @@ class ActionRenderObserver:
         spinner.set_active_action(text, action_id=_tool_event_id(data))
 
     def _clear_active_action(self, data: dict[str, Any]) -> None:
-        spinner = get_investigation_spinner()
+        spinner = get_turn_spinner()
         if spinner is not None:
             spinner.clear_active_action(_tool_event_id(data))
 
     def _has_active_action(self) -> bool:
-        spinner = get_investigation_spinner()
+        spinner = get_turn_spinner()
         return bool(spinner is not None and spinner.active_action)
 
     def _render_intermediate_message(self, data: dict[str, Any]) -> None:
@@ -495,71 +530,95 @@ class ActionRenderObserver:
         if is_plan_diagnosis_prose(content):
             return
         self.console.print()
-        # Intermediate narration is a working note: dim + indented, no glyph, so
-        # it reads apart from the recessed ``[n] ❯`` user row and bright ``∴`` reply.
+        # Intermediate narration is a labeled working note, visually secondary
+        # to the final reply without floating as unmarked prose.
         # ``render_note_block`` sanitizes model text at ``_build_markdown_block``.
         render_note_block(self.console, content)
 
     def _render_skill_start(self, data: dict[str, Any]) -> None:
-        """Print ``Skill <name>`` when the agent starts loading a skill."""
+        """Remember the skill slug for its ``tool_end``; nothing prints yet."""
         args = data.get("input")
         raw_name = str(args.get("name", "")).strip() if isinstance(args, dict) else ""
         slug = strip_terminal_controls(raw_name.replace("_", "-").lower()) or "skill"
-        self._pending_skill_calls[str(data.get("id") or "")] = slug
-        # ``Text`` renders the (model-supplied) skill name literally — never
-        # through Rich markup.
-        line = Text()
-        line.append("Skill ", style=BOLD_SKILL)
-        line.append(slug, style=HIGHLIGHT)
-        self.console.print()
-        self.console.print(line)
+        self._pending_skill_calls[_tool_event_id(data)] = slug
 
     def _render_tool_invocation(self, name: str, data: dict[str, Any]) -> None:
-        """Show the running tool as one marked line: ``⏺ Label · payload``."""
+        """Buffer the running tool for the grouped action log — no inline args.
+
+        The visible section shows a concise status only (a trimmed command for
+        runnable tools, the label alone for the rest); the ``key: value``
+        arguments go into the Ctrl+O detail, never the dotted inline strip.
+        """
         args = data.get("input")
         label, content = tool_call_display(name, args if isinstance(args, dict) else {})
-        self.console.print()
-        # One line per call, led by ``⏺``: the label reads as the action and the
-        # payload (command / args) as its detail. A command tool separates the two
-        # with ``·`` so ``⏺ GitHub CLI · gh api …`` reads as a single unit.
-        line = Text()
-        line.append(f"{_TOOL_CALL_MARKER} ", style=str(HIGHLIGHT))
-        line.append(label, style=f"bold {HIGHLIGHT}")
-        if content:
-            separator = " · " if label in _COMMAND_TOOL_LABELS else " "
-            line.append(separator, style=str(DIM))
-            line.append(content, style=str(BRAND))
-        self.console.print(line)
+        if label in _COMMAND_TOOL_LABELS:
+            concise = _collapsed_line(content) if content else ""
+            detail = transcript_line(
+                TranscriptRole.TOOL,
+                f"{label} · {content}" if content else label,
+            )
+        else:
+            concise = ""
+            detail = transcript_line(TranscriptRole.TOOL, label)
+            if content:
+                # Unfold the dotted argument strip beneath the labeled body column.
+                indent = transcript_continuation(TranscriptRole.TOOL)
+                detail += "\n" + "\n".join(f"{indent}{part}" for part in content.split(" · "))
+        self.session.terminal.push_action_log(
+            ActionLogEntry(call_id=_tool_event_id(data), kind=label, concise=concise, detail=detail)
+        )
 
     def _render_tool_result(self, data: dict[str, Any]) -> None:
-        """Nest the user-facing result under the ``⏺`` call as a ``↳`` child.
+        """Fold the user-facing result under its buffered call (Ctrl+O detail).
 
-        Droid / Claude Code / Cursor keep the result attached to the call.
-        JSON blobs stay hidden — the closing reply summarizes those.
+        JSON blobs stay hidden — the closing reply summarizes those. A tool that
+        painted its own output during execution loses its buffered row: the
+        buffer flushes at the end of the turn, so the row would print under the
+        output it labels.
         """
-        preview = _tool_result_preview(data.get("output"))
+        output = data.get("output")
+        if isinstance(output, dict) and output.get("rendered_in_shell") is True:
+            self.session.terminal.drop_action_log(_tool_event_id(data))
+            return
+        preview = _tool_result_preview(output)
         if not preview:
             return
-        print_command_output(
-            self.console,
-            preview,
-            style=str(SECONDARY),
-            on_collapse=lambda body: self.session.terminal.stash_collapsed_tool_output(body),
-        )
+        rows = preview.splitlines() or [preview]
+        indent = transcript_continuation(TranscriptRole.TOOL)
+        result = "\n".join([f"{indent}↳ {rows[0]}", *(f"{indent}  {row}" for row in rows[1:])])
+        self.session.terminal.append_action_result(_tool_event_id(data), result)
         self.session.terminal.inline_tool_results = True
 
     def _render_skill_end(self, data: dict[str, Any]) -> None:
-        """Print the ``↳`` child line under the skill's ``tool_start`` parent.
+        """Print one labeled status line once the skill load finishes.
 
-        The next block (another call, a note, or the ``∴`` reply) opens with
-        its own blank line — do not add one here or the gap doubles.
+        Opens with its own blank line like every other block; the next block
+        (another call, a note, or the final reply) adds its own — do not add a
+        trailing one here or the gap doubles.
         """
-        if self._pending_skill_calls.pop(str(data.get("id") or ""), None) is None:
+        slug = self._pending_skill_calls.pop(_tool_event_id(data), None)
+        if slug is None:
             return
         output = data.get("output")
+        if isinstance(output, dict) and (
+            output.get("already_active") or output.get("already_loaded")
+        ):
+            # Already active: the activation line is in the transcript from the
+            # first entry. Already loaded: the name was guidance attached to a
+            # tool, so nothing was activated and nothing failed.
+            return
         activated = isinstance(output, dict) and bool(output.get("ok"))
-        label = "Skill activated" if activated else "Skill failed to load"
-        self.console.print(Text(f"  ↳ {label}", style=DIM))
+        # ``Text`` renders the (model-supplied) skill name literally — never
+        # through Rich markup.
+        line = Text()
+        if activated:
+            line.append("Skill activated ", style=BOLD_SKILL)
+        else:
+            line.append(transcript_prefix(TranscriptRole.ERROR), style=str(ERROR))
+            line.append("Could not load skill · ", style=str(TEXT))
+        line.append(slug, style=str(TEXT))
+        self.console.print()
+        self.console.print(line)
 
 
 __all__ = [

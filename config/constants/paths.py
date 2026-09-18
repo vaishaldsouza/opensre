@@ -18,6 +18,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from config.constants.ci_fixes import CI_FIX_LEDGER_PATH_ENV
 from config.constants.memory import OPENSRE_MEMORY_DIR_ENV
 from config.constants.organization import organization_id
 from config.constants.tenancy import INTEGRATIONS_STORE_PATH_ENV
@@ -149,7 +150,7 @@ def opensre_home() -> Path:
 def deployment_home() -> Path:
     """The organization this deployment serves, whether or not a scope is bound.
 
-    For an artifact two surfaces must share. A background investigation is
+    For an artifact two surfaces must share. A background task can be
     started in the shell, which binds no scope, and retrieved from a chat
     transport, which binds the organization, so :func:`opensre_home` would put
     them on different files. An unbound caller therefore resolves to the
@@ -178,6 +179,13 @@ def session_home() -> Path:
         return org_root
     actor_id = _safe_segment(scope.actor.id, label="actor id")
     return org_root / USERS_DIR_NAME / actor_id
+
+
+def ci_fix_ledger_path() -> Path:
+    """CI repair ledger shared by this deployment's shell and organization turns."""
+    root = deployment_home()
+    override = os.getenv(CI_FIX_LEDGER_PATH_ENV, "").strip()
+    return Path(override).expanduser() if override else root / "ci_fixes.json"
 
 
 def integrations_store_path() -> Path:
@@ -235,6 +243,7 @@ __all__ = [
     "ContextRootOwnerMismatchError",
     "UnsafePathSegmentError",
     "deployment_home",
+    "ci_fix_ledger_path",
     "ensure_opensre_tmp_dir",
     "get_memory_dir",
     "get_store_path",

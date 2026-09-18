@@ -8,22 +8,12 @@ from rich.console import Console
 
 from surfaces.interactive_shell.session import Session
 from surfaces.interactive_shell.ui.handoff_questions import (
-    is_handoff_question,
-    last_assistant_asked_handoff,
     render_ask_user_qa,
     render_choice_selection,
-    render_handoff_question,
     try_render_ask_user_submission,
 )
 from surfaces.interactive_shell.ui.input_prompt.rendering import render_submitted_prompt
 from surfaces.interactive_shell.ui.streaming.renderer import render_markdown_block
-
-
-def test_short_closing_question_is_a_handoff() -> None:
-    assert is_handoff_question("Which environment should I investigate first?")
-    assert is_handoff_question("**Want me to:** run a full investigation?")
-    assert not is_handoff_question("checkout is returning 502s")
-    assert not is_handoff_question("### [1/8] Prerequisite checks")
 
 
 def test_render_markdown_block_highlights_a_question() -> None:
@@ -35,18 +25,17 @@ def test_render_markdown_block_highlights_a_question() -> None:
     assert "Which environment should I investigate first?" in output
 
 
-def test_submitted_answer_to_a_handoff_is_marked() -> None:
+def test_submitted_handoff_answer_is_the_user_row() -> None:
     session = Session()
-    session.cli_agent_messages = [
-        ("user", "checkout is 502ing"),
-        ("assistant", "Which environment should I investigate first?"),
-    ]
+    # Only a structured picker / Ask-User handoff sets this flag; a plain
+    # assistant question in prose must not trigger the answer treatment.
+    session.terminal.awaiting_handoff_answer = True
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, highlight=False, width=80)
-    assert last_assistant_asked_handoff(list(session.cli_agent_messages))
     render_submitted_prompt(console, session, "staging")
     output = buffer.getvalue()
-    assert "↗ answer" in output
+    # No hanging ``↗ answer`` — the user row is the answer (Droid / Cursor).
+    assert "↗ answer" not in output
     assert "staging" in output
 
 
@@ -79,7 +68,13 @@ def test_ask_user_qa_highlights_answer_differently_from_question() -> None:
     from infrastructure.terminal import theme as ui_theme
 
     buffer = io.StringIO()
-    console = Console(file=buffer, force_terminal=True, color_system="truecolor", highlight=False)
+    console = Console(
+        file=buffer,
+        force_terminal=True,
+        color_system="truecolor",
+        highlight=False,
+        no_color=False,
+    )
     render_ask_user_qa(console, [("Which product should I demo?", "OpenSRE itself")])
     raw = buffer.getvalue()
 
@@ -145,6 +140,27 @@ def test_auto_submitted_single_choice_is_not_echoed_as_a_user_turn() -> None:
     assert session.terminal.pending_choice_response == "Blue-green"
 
 
+def test_single_answer_with_its_question_marks_only_the_label_as_the_choice() -> None:
+    # Arrange: a single-menu answer arrives as "1. question\nlabel", auto-submitted.
+    from core.agent_harness.session.pending_choice import AskUserQuestion, format_ask_user_answers
+    from surfaces.interactive_shell.session import Session
+    from surfaces.interactive_shell.ui.input_prompt.rendering import render_submitted_prompt
+
+    session = Session()
+    session.terminal.awaiting_handoff_answer = True
+    session.terminal.last_input_autosubmitted = True
+    question = AskUserQuestion(label="", title="Which repository should I analyze?", options=("a",))
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, highlight=False, width=80)
+
+    # Act
+    render_submitted_prompt(console, session, format_ask_user_answers((question,), ("acme/app",)))
+
+    # Assert: no second user row, and the acknowledgement filter sees the label alone.
+    assert buffer.getvalue() == ""
+    assert session.terminal.pending_choice_response == "acme/app"
+
+
 def test_choice_selection_strips_terminal_controls() -> None:
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, highlight=False, width=80)
@@ -154,8 +170,10 @@ def test_choice_selection_strips_terminal_controls() -> None:
     output = buffer.getvalue()
     assert "\x1b" not in output
     assert "\x07" not in output
-    assert "✓ Deploy?" in output
-    assert "Canary" in output
+    assert "Deploy?" in output and "Canary" in output
+    assert "✓" not in output
+    # Section gap above the card so it does not join Plan complete.
+    assert output.startswith("\n")
 
 
 def test_multi_select_choice_indents_every_selected_line() -> None:
@@ -167,12 +185,44 @@ def test_multi_select_choice_indents_every_selected_line() -> None:
     # Act
     render_choice_selection(console, "Select Complex Demos", answer)
 
-    # Assert: heading, then every option indented under it — never flush-left.
+    # Assert: the question once, then every option on its own row under it.
     lines = [line.rstrip() for line in buffer.getvalue().splitlines() if line.strip()]
-    assert "✓ Select Complex Demos" in lines
-    for label in ("Audit the architecture", "Find failing PRs", "Remediate alerts"):
-        assert f"  {label}" in lines
-        assert label not in lines
+    assert lines[0] == "Ask User"
+    assert lines[1].endswith("Select Complex Demos")
+    assert lines[2:] == [
+        "      Audit the architecture",
+        "      Find failing PRs",
+        "      Remediate alerts",
+    ]
+    assert "✓" not in buffer.getvalue()
+
+
+def test_choice_selection_is_the_ask_user_card() -> None:
+    """Single-pick recap is the one-question Ask User card, not a ``↳`` line or plan row.
+
+    Header, numbered bold question, the answer on the row beneath — the same
+    shape the batched wizard leaves — and no ``offered:`` list of the other rows.
+    """
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, highlight=False, width=120)
+
+    render_choice_selection(
+        console,
+        "Which demo would you like me to run?",
+        "Explore a repo and analyze its CI/CD performance (recommended)",
+    )
+
+    output = buffer.getvalue()
+    assert output.startswith("\n")
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    assert lines == [
+        "Ask User",
+        "  1.  Which demo would you like me to run?",
+        "      Explore a repo and analyze its CI/CD performance (recommended)",
+    ]
+    assert "↳" not in output
+    assert "offered:" not in output
+    assert "✓" not in output
 
 
 def test_try_render_rejects_a_single_choice_label() -> None:
@@ -182,12 +232,20 @@ def test_try_render_rejects_a_single_choice_label() -> None:
     assert buffer.getvalue() == ""
 
 
-def test_render_handoff_question_strips_terminal_controls() -> None:
+def test_plain_assistant_question_does_not_tag_the_next_turn() -> None:
+    """A conversational opener ending in ``?`` must not paint the follow-up.
+
+    Without the ``awaiting_handoff_answer`` flag the turn is an ordinary user
+    turn: no ``↗ answer`` marker and the input keeps the neutral row treatment.
+    """
+    session = Session()
+    session.cli_agent_messages = [
+        ("user", "good evening"),
+        ("assistant", "Good evening! How can I help?"),
+    ]
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, highlight=False, width=80)
-    render_handoff_question(console, "Which env?\x1b]0;pwn\x07\x1b[2K staging")
+    render_submitted_prompt(console, session, "how many open PRs in opensre?")
     output = buffer.getvalue()
-    assert "\x1b" not in output
-    assert "\x07" not in output
-    assert "Which env?" in output
-    assert "staging" in output
+    assert "↗ answer" not in output
+    assert "how many open PRs in opensre?" in output

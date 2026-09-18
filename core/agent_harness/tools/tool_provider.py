@@ -9,7 +9,6 @@ from typing import Any
 from core.agent_harness.ports import (
     CancelCapableConsole,
     ConfirmFn,
-    InvestigationPortsFactory,
     LlmProviderPortsFactory,
     SlashPortsFactory,
     SubprocessPresenterFactory,
@@ -17,9 +16,19 @@ from core.agent_harness.ports import (
     ToolEventObserver,
 )
 from core.agent_harness.tools.action_tools import get_action_tools_from_integrations_view
+from core.agent_harness.tools.skill_tool_catalog import SkillToolCatalog
 from core.agent_harness.tools.tool_context import (
     ACTION_TOOL_CONTEXT_RESOURCE_KEY,
     ActionToolScope,
+)
+from core.tool import LiveToolCatalog, RegisteredTool, SideEffectLevel
+
+# Fail-closed: unattended ticks may only use tools that cannot mutate the
+# machine or an external system. Morning-report weather/news is pre-fetched
+# by the scheduled runner, so shell_run is not required on the tick.
+_UNATTENDED_SAFE_LEVELS = frozenset({SideEffectLevel.NONE, SideEffectLevel.READ_ONLY})
+_UNATTENDED_BLOCKED_NAMES = frozenset(
+    {"propose_scheduled_delivery", "slash_invoke", "execute_python_code"}
 )
 
 ActionObserverFactory = Callable[[str], ToolEventObserver]
@@ -27,6 +36,14 @@ ActionObserverFactory = Callable[[str], ToolEventObserver]
 
 
 _TOOL_INPUT_LOG_PREVIEW_LIMIT = 500
+
+
+def tool_allowed_for_unattended_run(tool: Any) -> bool:
+    """True when ``tool`` may run on a scheduled skill tick."""
+    name = getattr(tool, "name", None)
+    if name in _UNATTENDED_BLOCKED_NAMES:
+        return False
+    return getattr(tool, "side_effect_level", None) in _UNATTENDED_SAFE_LEVELS
 
 
 def _tool_input_preview(value: Any) -> str:
@@ -49,10 +66,10 @@ class DefaultToolProvider:
         observer_factory: ActionObserverFactory | None = None,
         tool_action_logger: logging.Logger | None = None,
         subprocess_presenter_factory: SubprocessPresenterFactory | None = None,
-        investigation_ports_factory: InvestigationPortsFactory | None = None,
         llm_provider_ports_factory: LlmProviderPortsFactory | None = None,
         task_cancel_ports_factory: TaskCancelPortsFactory | None = None,
         slash_ports_factory: SlashPortsFactory | None = None,
+        unattended: bool = False,
     ) -> None:
         self._session = session
         self._console = console
@@ -61,11 +78,12 @@ class DefaultToolProvider:
         self._observer_factory = observer_factory
         self._tool_action_logger = tool_action_logger
         self._subprocess_presenter_factory = subprocess_presenter_factory
-        self._investigation_ports_factory = investigation_ports_factory
         self._llm_provider_ports_factory = llm_provider_ports_factory
         self._task_cancel_ports_factory = task_cancel_ports_factory
         self._slash_ports_factory = slash_ports_factory
+        self._unattended = unattended
         self._tool_scope: ActionToolScope | None = None
+        self._live_catalog: LiveToolCatalog[RegisteredTool] | None = None
 
     def bind_session(self, session: Any) -> None:
         """Point this provider at a freshly resolved session (gateway reuse)."""
@@ -96,10 +114,6 @@ class DefaultToolProvider:
                 True,
             )
 
-        investigation_ports = None
-        if self._investigation_ports_factory is not None:
-            investigation_ports = self._investigation_ports_factory()
-
         llm_provider_ports = None
         if self._llm_provider_ports_factory is not None:
             llm_provider_ports = self._llm_provider_ports_factory()
@@ -124,25 +138,35 @@ class DefaultToolProvider:
             history_start=len(getattr(self._session, "history", None) or []),
             turn_user_message=turn_user_message,
             subprocess_presenter=subprocess_presenter,
-            investigation_ports=investigation_ports,
             llm_provider_ports=llm_provider_ports,
             task_cancel_ports=task_cancel_ports,
             slash_ports=slash_ports,
         )
         self._tool_scope = ctx
         if self._precomputed_action_tools is not None:
-            return list(self._precomputed_action_tools)
-        resolved = (
-            resolved_integrations
-            if resolved_integrations is not None
-            else self._resolved_integrations()
-        )
-        return get_action_tools_from_integrations_view(ctx, resolved_integrations=resolved)
+            tools = list(self._precomputed_action_tools)
+        else:
+            resolved = (
+                resolved_integrations
+                if resolved_integrations is not None
+                else self._resolved_integrations()
+            )
+            tools = get_action_tools_from_integrations_view(ctx, resolved_integrations=resolved)
+        if not getattr(self._session, "skill_discovery_enabled", True):
+            tools = [tool for tool in tools if tool.name != "skill_view"]
+        if self._unattended:
+            tools = [tool for tool in tools if tool_allowed_for_unattended_run(tool)]
+        catalog = SkillToolCatalog(self._session, tools, enabled=not self._unattended)
+        self._live_catalog = LiveToolCatalog(catalog.snapshot)
+        return list(catalog.snapshot())
 
     def tool_resources(self) -> dict[str, Any]:
         if self._tool_scope is None:
             return {}
-        return {ACTION_TOOL_CONTEXT_RESOURCE_KEY: self._tool_scope}
+        resources = {ACTION_TOOL_CONTEXT_RESOURCE_KEY: self._tool_scope}
+        if self._live_catalog is not None:
+            self._live_catalog.bind(resources)
+        return resources
 
     def observer(self, *, message: str) -> ToolEventObserver:
         if self._observer_factory is not None:
